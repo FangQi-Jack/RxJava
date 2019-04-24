@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -16,95 +16,101 @@ package io.reactivex.internal.operators.observable;
 import java.util.Iterator;
 
 import io.reactivex.*;
+import io.reactivex.annotations.Nullable;
+import io.reactivex.exceptions.Exceptions;
 import io.reactivex.internal.disposables.EmptyDisposable;
-import io.reactivex.internal.functions.Objects;
-import io.reactivex.internal.subscribers.observable.BaseQueueDisposable;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.observers.BasicQueueDisposable;
 
 public final class ObservableFromIterable<T> extends Observable<T> {
     final Iterable<? extends T> source;
     public ObservableFromIterable(Iterable<? extends T> source) {
         this.source = source;
     }
-    
+
     @Override
-    public void subscribeActual(Observer<? super T> s) {
+    public void subscribeActual(Observer<? super T> observer) {
         Iterator<? extends T> it;
         try {
             it = source.iterator();
         } catch (Throwable e) {
-            EmptyDisposable.error(e, s);
+            Exceptions.throwIfFatal(e);
+            EmptyDisposable.error(e, observer);
             return;
         }
         boolean hasNext;
         try {
             hasNext = it.hasNext();
         } catch (Throwable e) {
-            EmptyDisposable.error(e, s);
+            Exceptions.throwIfFatal(e);
+            EmptyDisposable.error(e, observer);
             return;
         }
         if (!hasNext) {
-            EmptyDisposable.complete(s);
+            EmptyDisposable.complete(observer);
             return;
         }
-        
-        FromIterableDisposable<T> d = new FromIterableDisposable<T>(s, it);
-        s.onSubscribe(d);
-        
+
+        FromIterableDisposable<T> d = new FromIterableDisposable<T>(observer, it);
+        observer.onSubscribe(d);
+
         if (!d.fusionMode) {
             d.run();
         }
     }
-    
-    static final class FromIterableDisposable<T> extends BaseQueueDisposable<T> {
-        
-        final Observer<? super T> actual;
-        
+
+    static final class FromIterableDisposable<T> extends BasicQueueDisposable<T> {
+
+        final Observer<? super T> downstream;
+
         final Iterator<? extends T> it;
-        
-        volatile boolean disposed; 
-        
+
+        volatile boolean disposed;
+
         boolean fusionMode;
-        
+
         boolean done;
-        
+
         boolean checkNext;
-        
-        public FromIterableDisposable(Observer<? super T> actual, Iterator<? extends T> it) {
-            this.actual = actual;
+
+        FromIterableDisposable(Observer<? super T> actual, Iterator<? extends T> it) {
+            this.downstream = actual;
             this.it = it;
         }
 
         void run() {
             boolean hasNext;
-            
+
             do {
                 if (isDisposed()) {
                     return;
                 }
                 T v;
-                
+
                 try {
-                    v = Objects.requireNonNull(it.next(), "The iterator returned a null value");
+                    v = ObjectHelper.requireNonNull(it.next(), "The iterator returned a null value");
                 } catch (Throwable e) {
-                    actual.onError(e);
+                    Exceptions.throwIfFatal(e);
+                    downstream.onError(e);
                     return;
                 }
-                
-                actual.onNext(v);
-                
+
+                downstream.onNext(v);
+
                 if (isDisposed()) {
                     return;
                 }
                 try {
                     hasNext = it.hasNext();
                 } catch (Throwable e) {
-                    actual.onError(e);
+                    Exceptions.throwIfFatal(e);
+                    downstream.onError(e);
                     return;
                 }
             } while (hasNext);
-            
+
             if (!isDisposed()) {
-                actual.onComplete();
+                downstream.onComplete();
             }
         }
 
@@ -117,6 +123,7 @@ public final class ObservableFromIterable<T> extends Observable<T> {
             return NONE;
         }
 
+        @Nullable
         @Override
         public T poll() {
             if (done) {
@@ -130,8 +137,8 @@ public final class ObservableFromIterable<T> extends Observable<T> {
             } else {
                 checkNext = true;
             }
-            
-            return Objects.requireNonNull(it.next(), "The iterator returned a null value");
+
+            return ObjectHelper.requireNonNull(it.next(), "The iterator returned a null value");
         }
 
         @Override

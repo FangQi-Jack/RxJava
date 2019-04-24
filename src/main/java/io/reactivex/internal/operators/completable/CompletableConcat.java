@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -18,150 +18,237 @@ import java.util.concurrent.atomic.*;
 import org.reactivestreams.*;
 
 import io.reactivex.*;
-import io.reactivex.disposables.*;
-import io.reactivex.exceptions.MissingBackpressureException;
-import io.reactivex.internal.queue.SpscArrayQueue;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.exceptions.*;
+import io.reactivex.internal.disposables.DisposableHelper;
+import io.reactivex.internal.fuseable.*;
+import io.reactivex.internal.queue.*;
 import io.reactivex.internal.subscriptions.SubscriptionHelper;
 import io.reactivex.plugins.RxJavaPlugins;
 
 public final class CompletableConcat extends Completable {
-    final Publisher<? extends CompletableConsumable> sources;
+    final Publisher<? extends CompletableSource> sources;
     final int prefetch;
-    
-    public CompletableConcat(Publisher<? extends CompletableConsumable> sources, int prefetch) {
+
+    public CompletableConcat(Publisher<? extends CompletableSource> sources, int prefetch) {
         this.sources = sources;
         this.prefetch = prefetch;
     }
-    
+
     @Override
-    public void subscribeActual(CompletableSubscriber s) {
-        CompletableConcatSubscriber parent = new CompletableConcatSubscriber(s, prefetch);
-        sources.subscribe(parent);
+    public void subscribeActual(CompletableObserver observer) {
+        sources.subscribe(new CompletableConcatSubscriber(observer, prefetch));
     }
-    
+
     static final class CompletableConcatSubscriber
     extends AtomicInteger
-    implements Subscriber<CompletableConsumable>, Disposable {
-        /** */
-        private static final long serialVersionUID = 7412667182931235013L;
-        final CompletableSubscriber actual;
+    implements FlowableSubscriber<CompletableSource>, Disposable {
+        private static final long serialVersionUID = 9032184911934499404L;
+
+        final CompletableObserver downstream;
+
         final int prefetch;
-        final SerialDisposable sd;
-        
-        final SpscArrayQueue<CompletableConsumable> queue;
-        
-        Subscription s;
-        
+
+        final int limit;
+
+        final ConcatInnerObserver inner;
+
+        final AtomicBoolean once;
+
+        int sourceFused;
+
+        int consumed;
+
+        SimpleQueue<CompletableSource> queue;
+
+        Subscription upstream;
+
         volatile boolean done;
 
-        final AtomicBoolean once = new AtomicBoolean();
-        
-        final ConcatInnerSubscriber inner;
-        
-        public CompletableConcatSubscriber(CompletableSubscriber actual, int prefetch) {
-            this.actual = actual;
+        volatile boolean active;
+
+        CompletableConcatSubscriber(CompletableObserver actual, int prefetch) {
+            this.downstream = actual;
             this.prefetch = prefetch;
-            this.queue = new SpscArrayQueue<CompletableConsumable>(prefetch);
-            this.sd = new SerialDisposable();
-            this.inner = new ConcatInnerSubscriber();
+            this.inner = new ConcatInnerObserver(this);
+            this.once = new AtomicBoolean();
+            this.limit = prefetch - (prefetch >> 2);
         }
-        
+
         @Override
         public void onSubscribe(Subscription s) {
-            if (SubscriptionHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
-                s.request(prefetch);
+            if (SubscriptionHelper.validate(this.upstream, s)) {
+                this.upstream = s;
+
+                long r = prefetch == Integer.MAX_VALUE ? Long.MAX_VALUE : prefetch;
+
+                if (s instanceof QueueSubscription) {
+                    @SuppressWarnings("unchecked")
+                    QueueSubscription<CompletableSource> qs = (QueueSubscription<CompletableSource>) s;
+
+                    int m = qs.requestFusion(QueueSubscription.ANY);
+
+                    if (m == QueueSubscription.SYNC) {
+                        sourceFused = m;
+                        queue = qs;
+                        done = true;
+                        downstream.onSubscribe(this);
+                        drain();
+                        return;
+                    }
+                    if (m == QueueSubscription.ASYNC) {
+                        sourceFused = m;
+                        queue = qs;
+                        downstream.onSubscribe(this);
+                        s.request(r);
+                        return;
+                    }
+                }
+
+                if (prefetch == Integer.MAX_VALUE) {
+                    queue = new SpscLinkedArrayQueue<CompletableSource>(Flowable.bufferSize());
+                } else {
+                    queue = new SpscArrayQueue<CompletableSource>(prefetch);
+                }
+
+                downstream.onSubscribe(this);
+
+                s.request(r);
             }
         }
-        
+
         @Override
-        public void onNext(CompletableConsumable t) {
-            if (!queue.offer(t)) {
-                onError(new MissingBackpressureException());
-                return;
+        public void onNext(CompletableSource t) {
+            if (sourceFused == QueueSubscription.NONE) {
+                if (!queue.offer(t)) {
+                    onError(new MissingBackpressureException());
+                    return;
+                }
             }
-            if (getAndIncrement() == 0) {
-                next();
-            }
+            drain();
         }
-        
+
         @Override
         public void onError(Throwable t) {
             if (once.compareAndSet(false, true)) {
-                actual.onError(t);
-                return;
+                DisposableHelper.dispose(inner);
+                downstream.onError(t);
+            } else {
+                RxJavaPlugins.onError(t);
             }
-            RxJavaPlugins.onError(t);
         }
-        
+
         @Override
         public void onComplete() {
-            if (done) {
-                return;
-            }
             done = true;
-            if (getAndIncrement() == 0) {
-                next();
-            }
+            drain();
         }
-        
-        void innerError(Throwable e) {
-            s.cancel();
-            onError(e);
-        }
-        
-        void innerComplete() {
-            if (decrementAndGet() != 0) {
-                next();
-            }
-            if (!done) {
-                s.request(1);
-            }
-        }
-        
+
         @Override
         public void dispose() {
-            s.cancel();
-            sd.dispose();
+            upstream.cancel();
+            DisposableHelper.dispose(inner);
         }
 
         @Override
         public boolean isDisposed() {
-            return sd.isDisposed();
+            return DisposableHelper.isDisposed(inner.get());
         }
 
-        void next() {
-            boolean d = done;
-            CompletableConsumable c = queue.poll();
-            if (c == null) {
-                if (d) {
-                    if (once.compareAndSet(false, true)) {
-                        actual.onComplete();
-                    }
-                    return;
-                }
-                RxJavaPlugins.onError(new IllegalStateException("Queue is empty?!"));
+        void drain() {
+            if (getAndIncrement() != 0) {
                 return;
             }
-            
-            c.subscribe(inner);
+
+            for (;;) {
+                if (isDisposed()) {
+                    return;
+                }
+
+                if (!active) {
+
+                    boolean d = done;
+
+                    CompletableSource cs;
+
+                    try {
+                        cs = queue.poll();
+                    } catch (Throwable ex) {
+                        Exceptions.throwIfFatal(ex);
+                        innerError(ex);
+                        return;
+                    }
+
+                    boolean empty = cs == null;
+
+                    if (d && empty) {
+                        if (once.compareAndSet(false, true)) {
+                            downstream.onComplete();
+                        }
+                        return;
+                    }
+
+                    if (!empty) {
+                        active = true;
+                        cs.subscribe(inner);
+                        request();
+                    }
+                }
+
+                if (decrementAndGet() == 0) {
+                    break;
+                }
+            }
         }
-        
-        final class ConcatInnerSubscriber implements CompletableSubscriber {
+
+        void request() {
+            if (sourceFused != QueueSubscription.SYNC) {
+                int p = consumed + 1;
+                if (p == limit) {
+                    consumed = 0;
+                    upstream.request(p);
+                } else {
+                    consumed = p;
+                }
+            }
+        }
+
+        void innerError(Throwable e) {
+            if (once.compareAndSet(false, true)) {
+                upstream.cancel();
+                downstream.onError(e);
+            } else {
+                RxJavaPlugins.onError(e);
+            }
+        }
+
+        void innerComplete() {
+            active = false;
+            drain();
+        }
+
+        static final class ConcatInnerObserver extends AtomicReference<Disposable> implements CompletableObserver {
+            private static final long serialVersionUID = -5454794857847146511L;
+
+            final CompletableConcatSubscriber parent;
+
+            ConcatInnerObserver(CompletableConcatSubscriber parent) {
+                this.parent = parent;
+            }
+
             @Override
             public void onSubscribe(Disposable d) {
-                sd.set(d);
+                DisposableHelper.replace(this, d);
             }
-            
+
             @Override
             public void onError(Throwable e) {
-                innerError(e);
+                parent.innerError(e);
             }
-            
+
             @Override
             public void onComplete() {
-                innerComplete();
+                parent.innerComplete();
             }
         }
     }

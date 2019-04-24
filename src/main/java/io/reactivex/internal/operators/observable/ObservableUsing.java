@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,23 +13,25 @@
 
 package io.reactivex.internal.operators.observable;
 
+import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
-import io.reactivex.exceptions.CompositeException;
+import io.reactivex.exceptions.*;
 import io.reactivex.functions.*;
 import io.reactivex.internal.disposables.*;
+import io.reactivex.internal.functions.ObjectHelper;
 import io.reactivex.plugins.RxJavaPlugins;
 
 public final class ObservableUsing<T, D> extends Observable<T> {
-    final Supplier<? extends D> resourceSupplier;
-    final Function<? super D, ? extends ObservableConsumable<? extends T>> sourceSupplier;
+    final Callable<? extends D> resourceSupplier;
+    final Function<? super D, ? extends ObservableSource<? extends T>> sourceSupplier;
     final Consumer<? super D> disposer;
     final boolean eager;
-    
-    public ObservableUsing(Supplier<? extends D> resourceSupplier,
-            Function<? super D, ? extends ObservableConsumable<? extends T>> sourceSupplier, 
+
+    public ObservableUsing(Callable<? extends D> resourceSupplier,
+            Function<? super D, ? extends ObservableSource<? extends T>> sourceSupplier,
             Consumer<? super D> disposer,
             boolean eager) {
         this.resourceSupplier = resourceSupplier;
@@ -37,68 +39,71 @@ public final class ObservableUsing<T, D> extends Observable<T> {
         this.disposer = disposer;
         this.eager = eager;
     }
-    
+
     @Override
-    public void subscribeActual(Observer<? super T> s) {
+    public void subscribeActual(Observer<? super T> observer) {
         D resource;
-        
+
         try {
-            resource = resourceSupplier.get();
+            resource = resourceSupplier.call();
         } catch (Throwable e) {
-            EmptyDisposable.error(e, s);
+            Exceptions.throwIfFatal(e);
+            EmptyDisposable.error(e, observer);
             return;
         }
-        
-        ObservableConsumable<? extends T> source;
+
+        ObservableSource<? extends T> source;
         try {
-            source = sourceSupplier.apply(resource);
+            source = ObjectHelper.requireNonNull(sourceSupplier.apply(resource), "The sourceSupplier returned a null ObservableSource");
         } catch (Throwable e) {
+            Exceptions.throwIfFatal(e);
             try {
                 disposer.accept(resource);
             } catch (Throwable ex) {
-                EmptyDisposable.error(new CompositeException(ex, e), s);
+                Exceptions.throwIfFatal(ex);
+                EmptyDisposable.error(new CompositeException(e, ex), observer);
                 return;
             }
-            EmptyDisposable.error(e, s);
+            EmptyDisposable.error(e, observer);
             return;
         }
-        
-        UsingSubscriber<T, D> us = new UsingSubscriber<T, D>(s, resource, disposer, eager);
-        
+
+        UsingObserver<T, D> us = new UsingObserver<T, D>(observer, resource, disposer, eager);
+
         source.subscribe(us);
     }
-    
-    static final class UsingSubscriber<T, D> extends AtomicBoolean implements Observer<T>, Disposable {
-        /** */
+
+    static final class UsingObserver<T, D> extends AtomicBoolean implements Observer<T>, Disposable {
+
         private static final long serialVersionUID = 5904473792286235046L;
-        
-        final Observer<? super T> actual;
+
+        final Observer<? super T> downstream;
         final D resource;
         final Consumer<? super D> disposer;
         final boolean eager;
-        
-        Disposable s;
 
-        public UsingSubscriber(Observer<? super T> actual, D resource, Consumer<? super D> disposer, boolean eager) {
-            this.actual = actual;
+        Disposable upstream;
+
+        UsingObserver(Observer<? super T> actual, D resource, Consumer<? super D> disposer, boolean eager) {
+            this.downstream = actual;
             this.resource = resource;
             this.disposer = disposer;
             this.eager = eager;
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+                downstream.onSubscribe(this);
             }
         }
-        
+
         @Override
         public void onNext(T t) {
-            actual.onNext(t);
+            downstream.onNext(t);
         }
-        
+
         @Override
         public void onError(Throwable t) {
             if (eager) {
@@ -106,19 +111,20 @@ public final class ObservableUsing<T, D> extends Observable<T> {
                     try {
                         disposer.accept(resource);
                     } catch (Throwable e) {
-                        t = new CompositeException(e, t);
+                        Exceptions.throwIfFatal(e);
+                        t = new CompositeException(t, e);
                     }
                 }
-                
-                s.dispose();
-                actual.onError(t);
+
+                upstream.dispose();
+                downstream.onError(t);
             } else {
-                actual.onError(t);
-                s.dispose();
+                downstream.onError(t);
+                upstream.dispose();
                 disposeAfter();
             }
         }
-        
+
         @Override
         public void onComplete() {
             if (eager) {
@@ -126,24 +132,25 @@ public final class ObservableUsing<T, D> extends Observable<T> {
                     try {
                         disposer.accept(resource);
                     } catch (Throwable e) {
-                        actual.onError(e);
+                        Exceptions.throwIfFatal(e);
+                        downstream.onError(e);
                         return;
                     }
                 }
-                
-                s.dispose();
-                actual.onComplete();
+
+                upstream.dispose();
+                downstream.onComplete();
             } else {
-                actual.onComplete();
-                s.dispose();
+                downstream.onComplete();
+                upstream.dispose();
                 disposeAfter();
             }
         }
-        
+
         @Override
         public void dispose() {
             disposeAfter();
-            s.dispose();
+            upstream.dispose();
         }
 
         @Override
@@ -156,6 +163,7 @@ public final class ObservableUsing<T, D> extends Observable<T> {
                 try {
                     disposer.accept(resource);
                 } catch (Throwable e) {
+                    Exceptions.throwIfFatal(e);
                     // can't call actual.onError unless it is serialized, which is expensive
                     RxJavaPlugins.onError(e);
                 }

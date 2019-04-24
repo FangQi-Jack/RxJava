@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,34 +13,33 @@
 
 package io.reactivex.internal.operators.flowable;
 
-import java.util.*;
+import java.util.Iterator;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.*;
 
 import org.reactivestreams.*;
 
-import io.reactivex.exceptions.MissingBackpressureException;
+import io.reactivex.*;
+import io.reactivex.annotations.Nullable;
+import io.reactivex.exceptions.*;
 import io.reactivex.functions.Function;
-import io.reactivex.internal.functions.Objects;
-import io.reactivex.internal.fuseable.QueueSubscription;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.fuseable.*;
 import io.reactivex.internal.queue.SpscArrayQueue;
 import io.reactivex.internal.subscriptions.*;
 import io.reactivex.internal.util.*;
 import io.reactivex.plugins.RxJavaPlugins;
 
-public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
+public final class FlowableFlattenIterable<T, R> extends AbstractFlowableWithUpstream<T, R> {
 
     final Function<? super T, ? extends Iterable<? extends R>> mapper;
 
     final int prefetch;
 
-    public FlowableFlattenIterable(Publisher<T> source,
+    public FlowableFlattenIterable(Flowable<T> source,
             Function<? super T, ? extends Iterable<? extends R>> mapper, int prefetch) {
         super(source);
-        if (prefetch <= 0) {
-            throw new IllegalArgumentException("prefetch > 0 required but it was " + prefetch);
-        }
-        this.mapper = Objects.requireNonNull(mapper, "mapper");
+        this.mapper = mapper;
         this.prefetch = prefetch;
     }
 
@@ -66,9 +65,9 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
             Iterator<? extends R> it;
 
             try {
-                Iterable<? extends R> iter = mapper.apply(v);
+                Iterable<? extends R> iterable = mapper.apply(v);
 
-                it = iter.iterator();
+                it = iterable.iterator();
             } catch (Throwable ex) {
                 Exceptions.throwIfFatal(ex);
                 EmptySubscription.error(ex, s);
@@ -84,12 +83,11 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
     static final class FlattenIterableSubscriber<T, R>
     extends BasicIntQueueSubscription<R>
-    implements Subscriber<T> {
+    implements FlowableSubscriber<T> {
 
-        /** */
         private static final long serialVersionUID = -3096000382929934955L;
 
-        final Subscriber<? super R> actual;
+        final Subscriber<? super R> downstream;
 
         final Function<? super T, ? extends Iterable<? extends R>> mapper;
 
@@ -99,9 +97,9 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
         final AtomicLong requested;
 
-        Subscription s;
+        Subscription upstream;
 
-        Queue<T> queue;
+        SimpleQueue<T> queue;
 
         volatile boolean done;
 
@@ -115,9 +113,9 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
         int fusionMode;
 
-        public FlattenIterableSubscriber(Subscriber<? super R> actual,
+        FlattenIterableSubscriber(Subscriber<? super R> actual,
                 Function<? super T, ? extends Iterable<? extends R>> mapper, int prefetch) {
-            this.actual = actual;
+            this.downstream = actual;
             this.mapper = mapper;
             this.prefetch = prefetch;
             this.limit = prefetch - (prefetch >> 2);
@@ -127,8 +125,8 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
         @Override
         public void onSubscribe(Subscription s) {
-            if (SubscriptionHelper.validate(this.s, s)) {
-                this.s = s;
+            if (SubscriptionHelper.validate(this.upstream, s)) {
+                this.upstream = s;
 
                 if (s instanceof QueueSubscription) {
                     @SuppressWarnings("unchecked")
@@ -141,7 +139,7 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                         this.queue = qs;
                         done = true;
 
-                        actual.onSubscribe(this);
+                        downstream.onSubscribe(this);
 
                         return;
                     }
@@ -149,7 +147,7 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                         fusionMode = m;
                         this.queue = qs;
 
-                        actual.onSubscribe(this);
+                        downstream.onSubscribe(this);
 
                         s.request(prefetch);
                         return;
@@ -158,7 +156,7 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
                 queue = new SpscArrayQueue<T>(prefetch);
 
-                actual.onSubscribe(this);
+                downstream.onSubscribe(this);
 
                 s.request(prefetch);
             }
@@ -166,7 +164,10 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
         @Override
         public void onNext(T t) {
-            if (fusionMode != ASYNC && !queue.offer(t)) {
+            if (done) {
+                return;
+            }
+            if (fusionMode == NONE && !queue.offer(t)) {
                 onError(new MissingBackpressureException("Queue is full?!"));
                 return;
             }
@@ -175,7 +176,7 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
         @Override
         public void onError(Throwable t) {
-            if (Exceptions.addThrowable(error, t)) {
+            if (!done && ExceptionHelper.addThrowable(error, t)) {
                 done = true;
                 drain();
             } else {
@@ -185,6 +186,9 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
         @Override
         public void onComplete() {
+            if (done) {
+                return;
+            }
             done = true;
             drain();
         }
@@ -202,6 +206,8 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
             if (!cancelled) {
                 cancelled = true;
 
+                upstream.cancel();
+
                 if (getAndIncrement() == 0) {
                     queue.clear();
                 }
@@ -213,8 +219,8 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                 return;
             }
 
-            final Subscriber<? super R> a = actual;
-            final Queue<T> q = queue;
+            final Subscriber<? super R> a = downstream;
+            final SimpleQueue<T> q = queue;
             final boolean replenish = fusionMode != SYNC;
 
             int missed = 1;
@@ -229,7 +235,20 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
                     T t;
 
-                    t = q.poll();
+                    try {
+                        t = q.poll();
+                    } catch (Throwable ex) {
+                        Exceptions.throwIfFatal(ex);
+                        upstream.cancel();
+                        ExceptionHelper.addThrowable(error, ex);
+                        ex = ExceptionHelper.terminate(error);
+
+                        current = null;
+                        q.clear();
+
+                        a.onError(ex);
+                        return;
+                    }
 
                     boolean empty = t == null;
 
@@ -250,9 +269,11 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                             b = it.hasNext();
                         } catch (Throwable ex) {
                             Exceptions.throwIfFatal(ex);
-                            onError(ex);
-                            it = null;
-                            continue;
+                            upstream.cancel();
+                            ExceptionHelper.addThrowable(error, ex);
+                            ex = ExceptionHelper.terminate(error);
+                            a.onError(ex);
+                            return;
                         }
 
                         if (!b) {
@@ -277,11 +298,15 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                         R v;
 
                         try {
-                            v = it.next();
+                            v = ObjectHelper.requireNonNull(it.next(), "The iterator returned a null value");
                         } catch (Throwable ex) {
                             Exceptions.throwIfFatal(ex);
-                            onError(ex);
-                            continue;
+                            current = null;
+                            upstream.cancel();
+                            ExceptionHelper.addThrowable(error, ex);
+                            ex = ExceptionHelper.terminate(error);
+                            a.onError(ex);
+                            return;
                         }
 
                         a.onNext(v);
@@ -298,8 +323,12 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                             b = it.hasNext();
                         } catch (Throwable ex) {
                             Exceptions.throwIfFatal(ex);
-                            onError(ex);
-                            continue;
+                            current = null;
+                            upstream.cancel();
+                            ExceptionHelper.addThrowable(error, ex);
+                            ex = ExceptionHelper.terminate(error);
+                            a.onError(ex);
+                            return;
                         }
 
                         if (!b) {
@@ -312,15 +341,7 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
                     if (e == r) {
                         boolean d = done;
-                        boolean empty;
-
-                        try {
-                            empty = q.isEmpty() && it == null;
-                        } catch (Throwable ex) {
-                            Exceptions.throwIfFatal(ex);
-                            onError(ex);
-                            empty = true;
-                        }
+                        boolean empty = q.isEmpty() && it == null;
 
                         if (checkTerminated(d, empty, a, q)) {
                             return;
@@ -350,14 +371,14 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                 int c = consumed + 1;
                 if (c == limit) {
                     consumed = 0;
-                    s.request(c);
+                    upstream.request(c);
                 } else {
                     consumed = c;
                 }
             }
         }
 
-        boolean checkTerminated(boolean d, boolean empty, Subscriber<?> a, Queue<?> q) {
+        boolean checkTerminated(boolean d, boolean empty, Subscriber<?> a, SimpleQueue<?> q) {
             if (cancelled) {
                 current = null;
                 q.clear();
@@ -366,18 +387,17 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
             if (d) {
                 Throwable ex = error.get();
                 if (ex != null) {
-                    ex = Exceptions.terminate(error);
+                    ex = ExceptionHelper.terminate(error);
 
                     current = null;
                     q.clear();
 
                     a.onError(ex);
                     return true;
-                } else
-                    if (empty) {
-                        a.onComplete();
-                        return true;
-                    }
+                } else if (empty) {
+                    a.onComplete();
+                    return true;
+                }
             }
             return false;
         }
@@ -390,15 +410,12 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
 
         @Override
         public boolean isEmpty() {
-            Iterator<? extends R> it = current;
-            if (it != null) {
-                return it.hasNext();
-            }
-            return queue.isEmpty(); // estimate
+            return current == null && queue.isEmpty();
         }
 
+        @Nullable
         @Override
-        public R poll() {
+        public R poll() throws Exception {
             Iterator<? extends R> it = current;
             for (;;) {
                 if (it == null) {
@@ -410,12 +427,13 @@ public final class FlowableFlattenIterable<T, R> extends FlowableSource<T, R> {
                     it = mapper.apply(v).iterator();
 
                     if (!it.hasNext()) {
+                        it = null;
                         continue;
                     }
                     current = it;
                 }
 
-                R r = it.next();
+                R r = ObjectHelper.requireNonNull(it.next(), "The iterator returned a null value");
 
                 if (!it.hasNext()) {
                     current = null;

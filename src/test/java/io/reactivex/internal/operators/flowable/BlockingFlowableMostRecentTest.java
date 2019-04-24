@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,31 +13,29 @@
 
 package io.reactivex.internal.operators.flowable;
 
-import static io.reactivex.internal.operators.flowable.BlockingFlowableMostRecent.mostRecent;
 import static org.junit.Assert.*;
 
-import java.util.Iterator;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.*;
 
 import io.reactivex.*;
 import io.reactivex.exceptions.TestException;
-import io.reactivex.flowables.BlockingFlowable;
 import io.reactivex.processors.*;
 import io.reactivex.schedulers.TestScheduler;
 
 public class BlockingFlowableMostRecentTest {
     @Test
     public void testMostRecentNull() {
-        assertEquals(null, Flowable.<Void>never().toBlocking().mostRecent(null).iterator().next());
+        assertEquals(null, Flowable.<Void>never().blockingMostRecent(null).iterator().next());
     }
 
     @Test
     public void testMostRecent() {
-        FlowProcessor<String> s = PublishProcessor.create();
+        FlowableProcessor<String> s = PublishProcessor.create();
 
-        Iterator<String> it = mostRecent(s, "default").iterator();
+        Iterator<String> it = s.blockingMostRecent("default").iterator();
 
         assertTrue(it.hasNext());
         assertEquals("default", it.next());
@@ -60,9 +58,9 @@ public class BlockingFlowableMostRecentTest {
 
     @Test(expected = TestException.class)
     public void testMostRecentWithException() {
-        FlowProcessor<String> s = PublishProcessor.create();
+        FlowableProcessor<String> s = PublishProcessor.create();
 
-        Iterator<String> it = mostRecent(s, "default").iterator();
+        Iterator<String> it = s.blockingMostRecent("default").iterator();
 
         assertTrue(it.hasNext());
         assertEquals("default", it.next());
@@ -77,9 +75,9 @@ public class BlockingFlowableMostRecentTest {
     @Test(timeout = 1000)
     public void testSingleSourceManyIterators() {
         TestScheduler scheduler = new TestScheduler();
-        BlockingFlowable<Long> source = Flowable.interval(1, TimeUnit.SECONDS, scheduler).take(10).toBlocking();
+        Flowable<Long> source = Flowable.interval(1, TimeUnit.SECONDS, scheduler).take(10);
 
-        Iterable<Long> iter = source.mostRecent(-1L);
+        Iterable<Long> iter = source.blockingMostRecent(-1L);
 
         for (int j = 0; j < 3; j++) {
             Iterator<Long> it = iter.iterator();
@@ -99,10 +97,30 @@ public class BlockingFlowableMostRecentTest {
 
     }
 
-    @Ignore("THe target is an enum")
+    @Ignore("The target is an enum")
     @Test
     public void constructorshouldbeprivate() {
         TestHelper.checkUtilityClass(BlockingFlowableMostRecent.class);
     }
 
+    @Test
+    public void empty() {
+        Iterator<Integer> it = Flowable.<Integer>empty()
+        .blockingMostRecent(1)
+        .iterator();
+
+        try {
+            it.next();
+            fail("Should have thrown");
+        } catch (NoSuchElementException ex) {
+            // expected
+        }
+
+        try {
+            it.remove();
+            fail("Should have thrown");
+        } catch (UnsupportedOperationException ex) {
+            // expected
+        }
+    }
 }

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,15 +13,14 @@
 
 package io.reactivex.internal.operators.observable;
 
-import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.*;
+
+import java.util.concurrent.Callable;
 
 import org.junit.Test;
 
 import io.reactivex.*;
 import io.reactivex.exceptions.TestException;
-import io.reactivex.functions.Supplier;
-import io.reactivex.observers.DefaultObserver;
 
 @SuppressWarnings("unchecked")
 public class ObservableDeferTest {
@@ -29,11 +28,11 @@ public class ObservableDeferTest {
     @Test
     public void testDefer() throws Throwable {
 
-        Supplier<Observable<String>> factory = mock(Supplier.class);
+        Callable<Observable<String>> factory = mock(Callable.class);
 
         Observable<String> firstObservable = Observable.just("one", "two");
         Observable<String> secondObservable = Observable.just("three", "four");
-        when(factory.get()).thenReturn(firstObservable, secondObservable);
+        when(factory.call()).thenReturn(firstObservable, secondObservable);
 
         Observable<String> deferred = Observable.defer(factory);
 
@@ -42,7 +41,7 @@ public class ObservableDeferTest {
         Observer<String> firstObserver = TestHelper.mockObserver();
         deferred.subscribe(firstObserver);
 
-        verify(factory, times(1)).get();
+        verify(factory, times(1)).call();
         verify(firstObserver, times(1)).onNext("one");
         verify(firstObserver, times(1)).onNext("two");
         verify(firstObserver, times(0)).onNext("three");
@@ -52,7 +51,7 @@ public class ObservableDeferTest {
         Observer<String> secondObserver = TestHelper.mockObserver();
         deferred.subscribe(secondObserver);
 
-        verify(factory, times(2)).get();
+        verify(factory, times(2)).call();
         verify(secondObserver, times(0)).onNext("one");
         verify(secondObserver, times(0)).onNext("two");
         verify(secondObserver, times(1)).onNext("three");
@@ -60,19 +59,19 @@ public class ObservableDeferTest {
         verify(secondObserver, times(1)).onComplete();
 
     }
-    
+
     @Test
-    public void testDeferFunctionThrows() {
-        Supplier<Observable<String>> factory = mock(Supplier.class);
-        
-        when(factory.get()).thenThrow(new TestException());
-        
+    public void testDeferFunctionThrows() throws Exception {
+        Callable<Observable<String>> factory = mock(Callable.class);
+
+        when(factory.call()).thenThrow(new TestException());
+
         Observable<String> result = Observable.defer(factory);
-        
-        DefaultObserver<String> o = mock(DefaultObserver.class);
-        
+
+        Observer<String> o = TestHelper.mockObserver();
+
         result.subscribe(o);
-        
+
         verify(o).onError(any(TestException.class));
         verify(o, never()).onNext(any(String.class));
         verify(o, never()).onComplete();

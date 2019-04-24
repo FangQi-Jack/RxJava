@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -24,25 +24,25 @@ import org.junit.*;
 import io.reactivex.*;
 import io.reactivex.Observable;
 import io.reactivex.Observer;
+import io.reactivex.disposables.Disposables;
 import io.reactivex.functions.Consumer;
-import io.reactivex.internal.disposables.EmptyDisposable;
 import io.reactivex.observers.*;
 import io.reactivex.schedulers.Schedulers;
 
 public class ReplaySubjectConcurrencyTest {
 
     @Test(timeout = 4000)
-    public void testNbpReplaySubjectConcurrentSubscribersDoingReplayDontBlockEachOther() throws InterruptedException {
+    public void testReplaySubjectConcurrentSubscribersDoingReplayDontBlockEachOther() throws InterruptedException {
         final ReplaySubject<Long> replay = ReplaySubject.create();
         Thread source = new Thread(new Runnable() {
 
             @Override
             public void run() {
-                Observable.create(new ObservableConsumable<Long>() {
+                Observable.unsafeCreate(new ObservableSource<Long>() {
 
                     @Override
                     public void subscribe(Observer<? super Long> o) {
-                        o.onSubscribe(EmptyDisposable.INSTANCE);
+                        o.onSubscribe(Disposables.empty());
                         System.out.println("********* Start Source Data ***********");
                         for (long l = 1; l <= 10000; l++) {
                             o.onNext(l);
@@ -55,7 +55,7 @@ public class ReplaySubjectConcurrencyTest {
         });
         source.start();
 
-        long v = replay.toBlocking().last();
+        long v = replay.blockingLast();
         assertEquals(10000, v);
 
         // it's been played through once so now it will all be replays
@@ -142,17 +142,17 @@ public class ReplaySubjectConcurrencyTest {
     }
 
     @Test
-    public void testNbpReplaySubjectConcurrentSubscriptions() throws InterruptedException {
+    public void testReplaySubjectConcurrentSubscriptions() throws InterruptedException {
         final ReplaySubject<Long> replay = ReplaySubject.create();
         Thread source = new Thread(new Runnable() {
 
             @Override
             public void run() {
-                Observable.create(new ObservableConsumable<Long>() {
+                Observable.unsafeCreate(new ObservableSource<Long>() {
 
                     @Override
                     public void subscribe(Observer<? super Long> o) {
-                        o.onSubscribe(EmptyDisposable.INSTANCE);
+                        o.onSubscribe(Disposables.empty());
                         System.out.println("********* Start Source Data ***********");
                         for (long l = 1; l <= 10000; l++) {
                             o.onNext(l);
@@ -183,7 +183,7 @@ public class ReplaySubjectConcurrencyTest {
 
                 @Override
                 public void run() {
-                    List<Long> values = replay.toList().toBlocking().last();
+                    List<Long> values = replay.toList().blockingGet();
                     listOfListsOfValues.add(values);
                     System.out.println("Finished thread: " + count);
                 }
@@ -226,7 +226,7 @@ public class ReplaySubjectConcurrencyTest {
     }
 
     /**
-     * Can receive timeout if subscribe never receives an onError/onCompleted ... which reveals a race condition.
+     * Can receive timeout if subscribe never receives an onError/onComplete ... which reveals a race condition.
      */
     @Test(timeout = 10000)
     public void testSubscribeCompletionRaceCondition() {
@@ -286,44 +286,46 @@ public class ReplaySubjectConcurrencyTest {
         }
 
     }
-    
+
     /**
+     * Make sure emission-subscription races are handled correctly.
      * https://github.com/ReactiveX/RxJava/issues/1147
      */
     @Test
     public void testRaceForTerminalState() {
         final List<Integer> expected = Arrays.asList(1);
         for (int i = 0; i < 100000; i++) {
-            TestObserver<Integer> ts = new TestObserver<Integer>();
-            Observable.just(1).subscribeOn(Schedulers.computation()).cache().subscribe(ts);
-            ts.awaitTerminalEvent();
-            ts.assertValueSequence(expected);
-            ts.assertTerminated();
+            TestObserver<Integer> to = new TestObserver<Integer>();
+            Observable.just(1).subscribeOn(Schedulers.computation()).cache().subscribe(to);
+            to.awaitTerminalEvent();
+            to.assertValueSequence(expected);
+            to.assertTerminated();
         }
     }
 
-    private static class SubjectObserverThread extends Thread {
+    static class SubjectObserverThread extends Thread {
 
         private final ReplaySubject<String> subject;
         private final AtomicReference<String> value = new AtomicReference<String>();
 
-        public SubjectObserverThread(ReplaySubject<String> subject) {
+        SubjectObserverThread(ReplaySubject<String> subject) {
             this.subject = subject;
         }
 
         @Override
         public void run() {
             try {
-                // a timeout exception will happen if we don't get a terminal state 
-                String v = subject.timeout(2000, TimeUnit.MILLISECONDS).toBlocking().single();
+                // a timeout exception will happen if we don't get a terminal state
+                String v = subject.timeout(2000, TimeUnit.MILLISECONDS).blockingSingle();
                 value.set(v);
             } catch (Exception e) {
                 e.printStackTrace();
             }
         }
     }
+
     @Test
-    public void testNbpReplaySubjectEmissionSubscriptionRace() throws Exception {
+    public void testReplaySubjectEmissionSubscriptionRace() throws Exception {
         Scheduler s = Schedulers.io();
         Scheduler.Worker worker = Schedulers.io().createWorker();
         try {
@@ -332,10 +334,10 @@ public class ReplaySubjectConcurrencyTest {
                     System.out.println(i);
                 }
                 final ReplaySubject<Object> rs = ReplaySubject.create();
-                
-                final CountDownLatch finish = new CountDownLatch(1); 
-                final CountDownLatch start = new CountDownLatch(1); 
-                
+
+                final CountDownLatch finish = new CountDownLatch(1);
+                final CountDownLatch start = new CountDownLatch(1);
+
                 worker.schedule(new Runnable() {
                     @Override
                     public void run() {
@@ -347,36 +349,36 @@ public class ReplaySubjectConcurrencyTest {
                         rs.onNext(1);
                     }
                 });
-                
+
                 final AtomicReference<Object> o = new AtomicReference<Object>();
-                
+
                 rs.subscribeOn(s).observeOn(Schedulers.io())
                 .subscribe(new DefaultObserver<Object>() {
-    
+
                     @Override
                     public void onComplete() {
                         o.set(-1);
                         finish.countDown();
                     }
-    
+
                     @Override
                     public void onError(Throwable e) {
                         o.set(e);
                         finish.countDown();
                     }
-    
+
                     @Override
                     public void onNext(Object t) {
                         o.set(t);
                         finish.countDown();
                     }
-                    
+
                 });
                 start.countDown();
-                
+
                 if (!finish.await(5, TimeUnit.SECONDS)) {
                     System.out.println(o.get());
-                    System.out.println(rs.hasSubscribers());
+                    System.out.println(rs.hasObservers());
                     rs.onComplete();
                     Assert.fail("Timeout @ " + i);
                     break;
@@ -388,18 +390,19 @@ public class ReplaySubjectConcurrencyTest {
                             rs.onComplete();
                         }
                     });
-                    
+
                 }
             }
         } finally {
             worker.dispose();
         }
     }
+
     @Test(timeout = 10000)
     public void testConcurrentSizeAndHasAnyValue() throws InterruptedException {
         final ReplaySubject<Object> rs = ReplaySubject.create();
         final CyclicBarrier cb = new CyclicBarrier(2);
-        
+
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -441,7 +444,7 @@ public class ReplaySubjectConcurrencyTest {
             }
             lastSize = size;
         }
-        
+
         t.join();
     }
 }

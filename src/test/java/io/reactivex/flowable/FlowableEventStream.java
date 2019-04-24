@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -15,9 +15,7 @@ package io.reactivex.flowable;
 
 import java.util.*;
 
-import org.reactivestreams.Subscriber;
-
-import io.reactivex.Flowable;
+import io.reactivex.*;
 import io.reactivex.functions.Consumer;
 import io.reactivex.schedulers.Schedulers;
 
@@ -29,20 +27,9 @@ public final class FlowableEventStream {
         throw new IllegalStateException("No instances!");
     }
     public static Flowable<Event> getEventStream(final String type, final int numInstances) {
-        
-        return Flowable.<Event>generate(new Consumer<Subscriber<Event>>() {
-            @Override
-            public void accept(Subscriber<Event> s) {
-                s.onNext(randomEvent(type, numInstances));
-                try {
-                    // slow it down somewhat
-                    Thread.sleep(50);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    s.onError(e);
-                }
-            }
-        }).subscribeOn(Schedulers.newThread());
+
+        return Flowable.<Event>generate(new EventConsumer(type, numInstances))
+                .subscribeOn(Schedulers.newThread());
     }
 
     public static Event randomEvent(String type, int numInstances) {
@@ -62,14 +49,37 @@ public final class FlowableEventStream {
         return Math.abs((int) x % max);
     }
 
+    static final class EventConsumer implements Consumer<Emitter<Event>> {
+        private final String type;
+        private final int numInstances;
+
+        EventConsumer(String type, int numInstances) {
+            this.type = type;
+            this.numInstances = numInstances;
+        }
+
+        @Override
+        public void accept(Emitter<Event> s) {
+            s.onNext(randomEvent(type, numInstances));
+            try {
+                // slow it down somewhat
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                s.onError(e);
+            }
+        }
+    }
+
     public static class Event {
         public final String type;
         public final String instanceId;
         public final Map<String, Object> values;
 
         /**
-         * @param type
-         * @param instanceId
+         * Construct an event with the provided parameters.
+         * @param type the event type
+         * @param instanceId the instance identifier
          * @param values
          *            This does NOT deep-copy, so do not mutate this Map after passing it in.
          */

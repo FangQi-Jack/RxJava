@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,16 +13,18 @@
 
 package io.reactivex.internal.operators.observable;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.*;
 
+import java.util.List;
 import java.util.concurrent.atomic.*;
 
 import org.junit.Test;
 
 import io.reactivex.*;
-import io.reactivex.disposables.Disposable;
+import io.reactivex.disposables.*;
+import io.reactivex.exceptions.TestException;
 import io.reactivex.functions.Consumer;
-import io.reactivex.internal.disposables.EmptyDisposable;
+import io.reactivex.plugins.RxJavaPlugins;
 
 public class ObservableDoOnSubscribeTest {
 
@@ -31,7 +33,7 @@ public class ObservableDoOnSubscribeTest {
         final AtomicInteger count = new AtomicInteger();
         Observable<Integer> o = Observable.just(1).doOnSubscribe(new Consumer<Disposable>() {
             @Override
-            public void accept(Disposable s) {
+            public void accept(Disposable d) {
                     count.incrementAndGet();
             }
         });
@@ -47,12 +49,12 @@ public class ObservableDoOnSubscribeTest {
         final AtomicInteger count = new AtomicInteger();
         Observable<Integer> o = Observable.just(1).doOnSubscribe(new Consumer<Disposable>() {
             @Override
-            public void accept(Disposable s) {
+            public void accept(Disposable d) {
                     count.incrementAndGet();
             }
         }).take(1).doOnSubscribe(new Consumer<Disposable>() {
             @Override
-            public void accept(Disposable s) {
+            public void accept(Disposable d) {
                     count.incrementAndGet();
             }
         });
@@ -67,24 +69,24 @@ public class ObservableDoOnSubscribeTest {
         final AtomicInteger countBefore = new AtomicInteger();
         final AtomicInteger countAfter = new AtomicInteger();
         final AtomicReference<Observer<? super Integer>> sref = new AtomicReference<Observer<? super Integer>>();
-        Observable<Integer> o = Observable.create(new ObservableConsumable<Integer>() {
+        Observable<Integer> o = Observable.unsafeCreate(new ObservableSource<Integer>() {
 
             @Override
-            public void subscribe(Observer<? super Integer> s) {
-                s.onSubscribe(EmptyDisposable.INSTANCE);
+            public void subscribe(Observer<? super Integer> observer) {
+                observer.onSubscribe(Disposables.empty());
                 onSubscribed.incrementAndGet();
-                sref.set(s);
+                sref.set(observer);
             }
 
         }).doOnSubscribe(new Consumer<Disposable>() {
             @Override
-            public void accept(Disposable s) {
+            public void accept(Disposable d) {
                     countBefore.incrementAndGet();
             }
         }).publish().refCount()
         .doOnSubscribe(new Consumer<Disposable>() {
             @Override
-            public void accept(Disposable s) {
+            public void accept(Disposable d) {
                     countAfter.incrementAndGet();
             }
         });
@@ -104,4 +106,34 @@ public class ObservableDoOnSubscribeTest {
         assertEquals(6, countAfter.get());
     }
 
+    @Test
+    public void onSubscribeCrash() {
+        List<Throwable> errors = TestHelper.trackPluginErrors();
+        try {
+            final Disposable bs = Disposables.empty();
+
+            new Observable<Integer>() {
+                @Override
+                protected void subscribeActual(Observer<? super Integer> observer) {
+                    observer.onSubscribe(bs);
+                    observer.onError(new TestException("Second"));
+                    observer.onComplete();
+                }
+            }
+            .doOnSubscribe(new Consumer<Disposable>() {
+                @Override
+                public void accept(Disposable d) throws Exception {
+                    throw new TestException("First");
+                }
+            })
+            .test()
+            .assertFailureAndMessage(TestException.class, "First");
+
+            assertTrue(bs.isDisposed());
+
+            TestHelper.assertUndeliverable(errors, 0, TestException.class, "Second");
+        } finally {
+            RxJavaPlugins.reset();
+        }
+    }
 }

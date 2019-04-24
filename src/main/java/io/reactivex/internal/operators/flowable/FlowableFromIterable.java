@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -18,19 +18,21 @@ import java.util.Iterator;
 import org.reactivestreams.Subscriber;
 
 import io.reactivex.Flowable;
-import io.reactivex.internal.functions.Objects;
+import io.reactivex.annotations.Nullable;
+import io.reactivex.exceptions.Exceptions;
+import io.reactivex.internal.functions.ObjectHelper;
 import io.reactivex.internal.fuseable.ConditionalSubscriber;
 import io.reactivex.internal.subscriptions.*;
-import io.reactivex.internal.util.*;
+import io.reactivex.internal.util.BackpressureHelper;
 
 public final class FlowableFromIterable<T> extends Flowable<T> {
-    
+
     final Iterable<? extends T> source;
-    
+
     public FlowableFromIterable(Iterable<? extends T> source) {
         this.source = source;
     }
-    
+
     @Override
     public void subscribeActual(Subscriber<? super T> s) {
         Iterator<? extends T> it;
@@ -44,7 +46,7 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
 
         subscribe(s, it);
     }
-    
+
     public static <T> void subscribe(Subscriber<? super T> s, Iterator<? extends T> it) {
         boolean hasNext;
         try {
@@ -54,12 +56,12 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
             EmptySubscription.error(e, s);
             return;
         }
-        
+
         if (!hasNext) {
             EmptySubscription.complete(s);
             return;
         }
-        
+
         if (s instanceof ConditionalSubscriber) {
             s.onSubscribe(new IteratorConditionalSubscription<T>(
                     (ConditionalSubscriber<? super T>)s, it));
@@ -67,28 +69,31 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
             s.onSubscribe(new IteratorSubscription<T>(s, it));
         }
     }
-    
-    static abstract class BaseRangeSubscription<T> extends BasicQueueSubscription<T> {
-        /** */
+
+    abstract static class BaseRangeSubscription<T> extends BasicQueueSubscription<T> {
         private static final long serialVersionUID = -2252972430506210021L;
 
-        final Iterator<? extends T> it;
-        
+        Iterator<? extends T> it;
+
         volatile boolean cancelled;
-        
+
         boolean once;
-        
-        public BaseRangeSubscription(Iterator<? extends T> it) {
+
+        BaseRangeSubscription(Iterator<? extends T> it) {
             this.it = it;
         }
-        
+
         @Override
         public final int requestFusion(int mode) {
             return mode & SYNC;
         }
 
+        @Nullable
         @Override
         public final T poll() {
+            if (it == null) {
+                return null;
+            }
             if (!once) {
                 once = true;
             } else {
@@ -96,18 +101,17 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                     return null;
                 }
             }
-            return Objects.requireNonNull(it.next(), "Iterator.next() returned a null value");
+            return ObjectHelper.requireNonNull(it.next(), "Iterator.next() returned a null value");
         }
 
-        
         @Override
         public final boolean isEmpty() {
-            return !it.hasNext();
+            return it == null || !it.hasNext();
         }
 
         @Override
         public final void clear() {
-            // nothing to do
+            it = null;
         }
 
         @Override
@@ -122,40 +126,46 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                 }
             }
         }
-        
 
         @Override
         public final void cancel() {
             cancelled = true;
         }
-        
+
         abstract void fastPath();
-        
+
         abstract void slowPath(long r);
     }
-    
+
     static final class IteratorSubscription<T> extends BaseRangeSubscription<T> {
 
-        /** */
         private static final long serialVersionUID = -6022804456014692607L;
 
-        final Subscriber<? super T> actual;
-        
-        public IteratorSubscription(Subscriber<? super T> actual, Iterator<? extends T> it) {
+        final Subscriber<? super T> downstream;
+
+        IteratorSubscription(Subscriber<? super T> actual, Iterator<? extends T> it) {
             super(it);
-            this.actual = actual;
+            this.downstream = actual;
         }
 
         @Override
         void fastPath() {
             Iterator<? extends T> it = this.it;
-            Subscriber<? super T> a = actual;
+            Subscriber<? super T> a = downstream;
             for (;;) {
                 if (cancelled) {
                     return;
                 }
-                
-                T t = it.next();
+
+                T t;
+
+                try {
+                    t = it.next();
+                } catch (Throwable ex) {
+                    Exceptions.throwIfFatal(ex);
+                    a.onError(ex);
+                    return;
+                }
 
                 if (cancelled) {
                     return;
@@ -172,7 +182,17 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                     return;
                 }
 
-                if (!it.hasNext()) {
+                boolean b;
+
+                try {
+                    b = it.hasNext();
+                } catch (Throwable ex) {
+                    Exceptions.throwIfFatal(ex);
+                    a.onError(ex);
+                    return;
+                }
+
+                if (!b) {
                     if (!cancelled) {
                         a.onComplete();
                     }
@@ -185,17 +205,25 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
         void slowPath(long r) {
             long e = 0L;
             Iterator<? extends T> it = this.it;
-            Subscriber<? super T> a = actual;
-            
+            Subscriber<? super T> a = downstream;
+
             for (;;) {
-                
+
                 while (e != r) {
-                    
+
                     if (cancelled) {
                         return;
                     }
-                    
-                    T t = it.next();
+
+                    T t;
+
+                    try {
+                        t = it.next();
+                    } catch (Throwable ex) {
+                        Exceptions.throwIfFatal(ex);
+                        a.onError(ex);
+                        return;
+                    }
 
                     if (cancelled) {
                         return;
@@ -207,35 +235,33 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                     } else {
                         a.onNext(t);
                     }
-                    
+
                     if (cancelled) {
                         return;
                     }
 
-                    if (!it.hasNext()) {
+                    boolean b;
+
+                    try {
+                        b = it.hasNext();
+                    } catch (Throwable ex) {
+                        Exceptions.throwIfFatal(ex);
+                        a.onError(ex);
+                        return;
+                    }
+
+                    if (!b) {
                         if (!cancelled) {
                             a.onComplete();
                         }
                         return;
                     }
-                    
+
                     e++;
                 }
-                
+
                 r = get();
                 if (e == r) {
-                    
-                    if (cancelled) {
-                        return;
-                    }
-
-                    if (!it.hasNext()) {
-                        if (!cancelled) {
-                            a.onComplete();
-                        }
-                        return;
-                    }
-                    
                     r = addAndGet(-e);
                     if (r == 0L) {
                         return;
@@ -244,31 +270,38 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                 }
             }
         }
-        
+
     }
-    
+
     static final class IteratorConditionalSubscription<T> extends BaseRangeSubscription<T> {
 
-        /** */
         private static final long serialVersionUID = -6022804456014692607L;
 
-        final ConditionalSubscriber<? super T> actual;
-        
-        public IteratorConditionalSubscription(ConditionalSubscriber<? super T> actual, Iterator<? extends T> it) {
+        final ConditionalSubscriber<? super T> downstream;
+
+        IteratorConditionalSubscription(ConditionalSubscriber<? super T> actual, Iterator<? extends T> it) {
             super(it);
-            this.actual = actual;
+            this.downstream = actual;
         }
 
         @Override
         void fastPath() {
             Iterator<? extends T> it = this.it;
-            ConditionalSubscriber<? super T> a = actual;
+            ConditionalSubscriber<? super T> a = downstream;
             for (;;) {
                 if (cancelled) {
                     return;
                 }
-                
-                T t = it.next();
+
+                T t;
+
+                try {
+                    t = it.next();
+                } catch (Throwable ex) {
+                    Exceptions.throwIfFatal(ex);
+                    a.onError(ex);
+                    return;
+                }
 
                 if (cancelled) {
                     return;
@@ -285,7 +318,17 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                     return;
                 }
 
-                if (!it.hasNext()) {
+                boolean b;
+
+                try {
+                    b = it.hasNext();
+                } catch (Throwable ex) {
+                    Exceptions.throwIfFatal(ex);
+                    a.onError(ex);
+                    return;
+                }
+
+                if (!b) {
                     if (!cancelled) {
                         a.onComplete();
                     }
@@ -298,17 +341,25 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
         void slowPath(long r) {
             long e = 0L;
             Iterator<? extends T> it = this.it;
-            ConditionalSubscriber<? super T> a = actual;
-            
+            ConditionalSubscriber<? super T> a = downstream;
+
             for (;;) {
-                
+
                 while (e != r) {
-                    
+
                     if (cancelled) {
                         return;
                     }
-                    
-                    T t = it.next();
+
+                    T t;
+
+                    try {
+                        t = it.next();
+                    } catch (Throwable ex) {
+                        Exceptions.throwIfFatal(ex);
+                        a.onError(ex);
+                        return;
+                    }
 
                     if (cancelled) {
                         return;
@@ -321,37 +372,35 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                     } else {
                         b = a.tryOnNext(t);
                     }
-                    
+
                     if (cancelled) {
                         return;
                     }
 
-                    if (!it.hasNext()) {
+                    boolean hasNext;
+
+                    try {
+                        hasNext = it.hasNext();
+                    } catch (Throwable ex) {
+                        Exceptions.throwIfFatal(ex);
+                        a.onError(ex);
+                        return;
+                    }
+
+                    if (!hasNext) {
                         if (!cancelled) {
                             a.onComplete();
                         }
                         return;
                     }
-                    
+
                     if (b) {
                         e++;
                     }
                 }
-                
+
                 r = get();
                 if (e == r) {
-                    
-                    if (cancelled) {
-                        return;
-                    }
-
-                    if (!it.hasNext()) {
-                        if (!cancelled) {
-                            a.onComplete();
-                        }
-                        return;
-                    }
-                    
                     r = addAndGet(-e);
                     if (r == 0L) {
                         return;
@@ -360,6 +409,6 @@ public final class FlowableFromIterable<T> extends Flowable<T> {
                 }
             }
         }
-        
+
     }
 }

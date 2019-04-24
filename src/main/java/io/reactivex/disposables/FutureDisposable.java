@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Netflix, Inc.
+ * Copyright (c) 2016-present, RxJava Contributors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
@@ -13,11 +13,15 @@
 package io.reactivex.disposables;
 
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
-final class FutureDisposable extends ReferenceDisposable<Future<?>> {
-    /** */
+/**
+ * A Disposable container that cancels a Future instance.
+ */
+final class FutureDisposable extends AtomicReference<Future<?>> implements Disposable {
+
     private static final long serialVersionUID = 6545242830671168775L;
-    
+
     private final boolean allowInterrupt;
 
     FutureDisposable(Future<?> run, boolean allowInterrupt) {
@@ -26,7 +30,16 @@ final class FutureDisposable extends ReferenceDisposable<Future<?>> {
     }
 
     @Override
-    protected void onDisposed(Future<?> value) {
-        value.cancel(allowInterrupt);
+    public boolean isDisposed() {
+        Future<?> f = get();
+        return f == null || f.isDone();
+    }
+
+    @Override
+    public void dispose() {
+        Future<?> f = getAndSet(null);
+        if (f != null) {
+            f.cancel(allowInterrupt);
+        }
     }
 }

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -15,64 +15,73 @@ package io.reactivex.internal.operators.single;
 import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
 import io.reactivex.internal.disposables.DisposableHelper;
+import io.reactivex.internal.observers.DeferredScalarDisposable;
 
 /**
- * Wraps a Single and exposes it as a Flowable.
+ * Wraps a Single and exposes it as an Observable.
  *
  * @param <T> the value type
  */
 public final class SingleToObservable<T> extends Observable<T> {
-    
-    final SingleConsumable<? extends T> source;
-    
-    public SingleToObservable(SingleConsumable<? extends T> source) {
+
+    final SingleSource<? extends T> source;
+
+    public SingleToObservable(SingleSource<? extends T> source) {
         this.source = source;
     }
-    
-    @Override
-    public void subscribeActual(final Observer<? super T> s) {
-        source.subscribe(new SingleToObservableObserver<T>(s));
-    }
-    
-    static final class SingleToObservableObserver<T> 
-    implements SingleSubscriber<T>, Disposable {
 
-        final Observer<? super T> actual;
-        
-        Disposable d;
-        
-        public SingleToObservableObserver(Observer<? super T> actual) {
-            this.actual = actual;
+    @Override
+    public void subscribeActual(final Observer<? super T> observer) {
+        source.subscribe(create(observer));
+    }
+
+    /**
+     * Creates a {@link SingleObserver} wrapper around a {@link Observer}.
+     * <p>History: 2.0.1 - experimental
+     * @param <T> the value type
+     * @param downstream the downstream {@code Observer} to talk to
+     * @return the new SingleObserver instance
+     * @since 2.2
+     */
+    public static <T> SingleObserver<T> create(Observer<? super T> downstream) {
+        return new SingleToObservableObserver<T>(downstream);
+    }
+
+    static final class SingleToObservableObserver<T>
+    extends DeferredScalarDisposable<T>
+    implements SingleObserver<T> {
+
+        private static final long serialVersionUID = 3786543492451018833L;
+        Disposable upstream;
+
+        SingleToObservableObserver(Observer<? super T> downstream) {
+            super(downstream);
         }
 
         @Override
         public void onSubscribe(Disposable d) {
-            if (DisposableHelper.validate(this.d, d)) {
-                this.d = d;
-                
-                actual.onSubscribe(this);
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+
+                downstream.onSubscribe(this);
             }
         }
 
         @Override
         public void onSuccess(T value) {
-            actual.onNext(value);
-            actual.onComplete();
+            complete(value);
         }
 
         @Override
         public void onError(Throwable e) {
-            actual.onError(e);
+            error(e);
         }
 
         @Override
         public void dispose() {
-            d.dispose();
+            super.dispose();
+            upstream.dispose();
         }
-        
-        @Override
-        public boolean isDisposed() {
-            return d.isDisposed();
-        }
+
     }
 }

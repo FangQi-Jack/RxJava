@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,7 +13,6 @@
 
 package io.reactivex.internal.operators.observable;
 
-import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.*;
 
 import java.util.concurrent.*;
@@ -23,7 +22,7 @@ import org.junit.Test;
 
 import io.reactivex.*;
 import io.reactivex.observers.TestObserver;
-import io.reactivex.schedulers.Schedulers;
+import io.reactivex.schedulers.*;
 
 public class ObservableToFutureTest {
 
@@ -36,16 +35,37 @@ public class ObservableToFutureTest {
 
         Observer<Object> o = TestHelper.mockObserver();
 
-        TestObserver<Object> ts = new TestObserver<Object>(o);
-        
-        Observable.fromFuture(future).subscribe(ts);
-        
-        ts.dispose();
+        TestObserver<Object> to = new TestObserver<Object>(o);
+
+        Observable.fromFuture(future).subscribe(to);
+
+        to.dispose();
 
         verify(o, times(1)).onNext(value);
         verify(o, times(1)).onComplete();
         verify(o, never()).onError(any(Throwable.class));
-        verify(future, times(1)).cancel(true);
+        verify(future, never()).cancel(true);
+    }
+
+    @Test
+    public void testSuccessOperatesOnSuppliedScheduler() throws Exception {
+        @SuppressWarnings("unchecked")
+        Future<Object> future = mock(Future.class);
+        Object value = new Object();
+        when(future.get()).thenReturn(value);
+
+        Observer<Object> o = TestHelper.mockObserver();
+
+        TestScheduler scheduler = new TestScheduler();
+        TestObserver<Object> to = new TestObserver<Object>(o);
+
+        Observable.fromFuture(future, scheduler).subscribe(to);
+
+        verify(o, never()).onNext(value);
+
+        scheduler.triggerActions();
+
+        verify(o, times(1)).onNext(value);
     }
 
     @Test
@@ -57,16 +77,16 @@ public class ObservableToFutureTest {
 
         Observer<Object> o = TestHelper.mockObserver();
 
-        TestObserver<Object> ts = new TestObserver<Object>(o);
-        
-        Observable.fromFuture(future).subscribe(ts);
-        
-        ts.dispose();
+        TestObserver<Object> to = new TestObserver<Object>(o);
+
+        Observable.fromFuture(future).subscribe(to);
+
+        to.dispose();
 
         verify(o, never()).onNext(null);
         verify(o, never()).onComplete();
         verify(o, times(1)).onError(e);
-        verify(future, times(1)).cancel(true);
+        verify(future, never()).cancel(true);
     }
 
     @Test
@@ -78,13 +98,13 @@ public class ObservableToFutureTest {
 
         Observer<Object> o = TestHelper.mockObserver();
 
-        TestObserver<Object> ts = new TestObserver<Object>(o);
-        ts.dispose();
-        
-        Observable.fromFuture(future).subscribe(ts);
-        
-        ts.assertNoErrors();
-        ts.assertNotComplete();
+        TestObserver<Object> to = new TestObserver<Object>(o);
+        to.dispose();
+
+        Observable.fromFuture(future).subscribe(to);
+
+        to.assertNoErrors();
+        to.assertNotComplete();
     }
 
     @Test
@@ -124,17 +144,17 @@ public class ObservableToFutureTest {
 
         Observer<Object> o = TestHelper.mockObserver();
 
-        TestObserver<Object> ts = new TestObserver<Object>(o);
+        TestObserver<Object> to = new TestObserver<Object>(o);
         Observable<Object> futureObservable = Observable.fromFuture(future);
-        
-        futureObservable.subscribeOn(Schedulers.computation()).subscribe(ts);
-        
+
+        futureObservable.subscribeOn(Schedulers.computation()).subscribe(to);
+
         Thread.sleep(100);
-        
-        ts.dispose();
-        
-        ts.assertNoErrors();
-        ts.assertNoValues();
-        ts.assertNotComplete();
+
+        to.dispose();
+
+        to.assertNoErrors();
+        to.assertNoValues();
+        to.assertNotComplete();
     }
 }

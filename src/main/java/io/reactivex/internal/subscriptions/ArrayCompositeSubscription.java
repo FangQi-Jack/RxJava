@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -27,7 +27,7 @@ import io.reactivex.disposables.Disposable;
  * and should be used by internal means only.
  */
 public final class ArrayCompositeSubscription extends AtomicReferenceArray<Subscription> implements Disposable {
-    /** */
+
     private static final long serialVersionUID = 2746389416410565408L;
 
     public ArrayCompositeSubscription(int capacity) {
@@ -36,15 +36,17 @@ public final class ArrayCompositeSubscription extends AtomicReferenceArray<Subsc
 
     /**
      * Sets the resource at the specified index and disposes the old resource.
-     * @param index
-     * @param resource
+     * @param index the index of the resource to set
+     * @param resource the new resource
      * @return true if the resource has ben set, false if the composite has been disposed
      */
     public boolean setResource(int index, Subscription resource) {
         for (;;) {
             Subscription o = get(index);
             if (o == SubscriptionHelper.CANCELLED) {
-                resource.cancel();
+                if (resource != null) {
+                    resource.cancel();
+                }
                 return false;
             }
             if (compareAndSet(index, o, resource)) {
@@ -55,18 +57,20 @@ public final class ArrayCompositeSubscription extends AtomicReferenceArray<Subsc
             }
         }
     }
-    
+
     /**
      * Replaces the resource at the specified index and returns the old resource.
-     * @param index
-     * @param resource
+     * @param index the index of the resource to replace
+     * @param resource the new resource
      * @return the old resource, can be null
      */
     public Subscription replaceResource(int index, Subscription resource) {
         for (;;) {
             Subscription o = get(index);
             if (o == SubscriptionHelper.CANCELLED) {
-                resource.cancel();
+                if (resource != null) {
+                    resource.cancel();
+                }
                 return null;
             }
             if (compareAndSet(index, o, resource)) {
@@ -74,7 +78,7 @@ public final class ArrayCompositeSubscription extends AtomicReferenceArray<Subsc
             }
         }
     }
-    
+
     @Override
     public void dispose() {
         if (get(0) != SubscriptionHelper.CANCELLED) {
@@ -90,7 +94,7 @@ public final class ArrayCompositeSubscription extends AtomicReferenceArray<Subsc
             }
         }
     }
-    
+
     @Override
     public boolean isDisposed() {
         return get(0) == SubscriptionHelper.CANCELLED;

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -17,70 +17,62 @@ import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
 import io.reactivex.internal.disposables.DisposableHelper;
 
-public final class ObservableMaterialize<T> extends ObservableSource<T, Try<Optional<T>>> {
-    
-    
-    public ObservableMaterialize(ObservableConsumable<T> source) {
+public final class ObservableMaterialize<T> extends AbstractObservableWithUpstream<T, Notification<T>> {
+
+    public ObservableMaterialize(ObservableSource<T> source) {
         super(source);
     }
 
     @Override
-    public void subscribeActual(Observer<? super Try<Optional<T>>> t) {
-        source.subscribe(new MaterializeSubscriber<T>(t));
+    public void subscribeActual(Observer<? super Notification<T>> t) {
+        source.subscribe(new MaterializeObserver<T>(t));
     }
-    
-    static final class MaterializeSubscriber<T> implements Observer<T>, Disposable {
-        final Observer<? super Try<Optional<T>>> actual;
-        
-        Disposable s;
-        
-        volatile boolean done;
-        
-        public MaterializeSubscriber(Observer<? super Try<Optional<T>>> actual) {
-            this.actual = actual;
+
+    static final class MaterializeObserver<T> implements Observer<T>, Disposable {
+        final Observer<? super Notification<T>> downstream;
+
+        Disposable upstream;
+
+        MaterializeObserver(Observer<? super Notification<T>> downstream) {
+            this.downstream = downstream;
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+                downstream.onSubscribe(this);
             }
         }
-        
 
         @Override
         public void dispose() {
-            s.dispose();
+            upstream.dispose();
         }
-        
+
         @Override
         public boolean isDisposed() {
-            return s.isDisposed();
+            return upstream.isDisposed();
         }
 
         @Override
         public void onNext(T t) {
-            actual.onNext(Notification.next(t));
+            downstream.onNext(Notification.createOnNext(t));
         }
-        
-        void tryEmit(Try<Optional<T>> v) {
-                
-        }
-        
+
         @Override
         public void onError(Throwable t) {
-            Try<Optional<T>> v = Notification.error(t);
-            actual.onNext(v);
-            actual.onComplete();
+            Notification<T> v = Notification.createOnError(t);
+            downstream.onNext(v);
+            downstream.onComplete();
         }
-        
+
         @Override
         public void onComplete() {
-            Try<Optional<T>> v = Notification.complete();
-            
-            actual.onNext(v);
-            actual.onComplete();
+            Notification<T> v = Notification.createOnComplete();
+
+            downstream.onNext(v);
+            downstream.onComplete();
         }
     }
 }

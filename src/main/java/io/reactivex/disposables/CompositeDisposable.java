@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -14,40 +14,56 @@ package io.reactivex.disposables;
 
 import java.util.*;
 
-import io.reactivex.exceptions.CompositeException;
+import io.reactivex.annotations.NonNull;
+import io.reactivex.exceptions.*;
 import io.reactivex.internal.disposables.DisposableContainer;
-import io.reactivex.internal.functions.Objects;
+import io.reactivex.internal.functions.ObjectHelper;
 import io.reactivex.internal.util.*;
 
 /**
- * A disposable container that can hold onto multiple other disposables.
+ * A disposable container that can hold onto multiple other disposables and
+ * offers O(1) add and removal complexity.
  */
 public final class CompositeDisposable implements Disposable, DisposableContainer {
-    
+
     OpenHashSet<Disposable> resources;
 
     volatile boolean disposed;
-    
+
+    /**
+     * Creates an empty CompositeDisposable.
+     */
     public CompositeDisposable() {
     }
-    
-    public CompositeDisposable(Disposable... resources) {
-        Objects.requireNonNull(resources, "resources is null");
-        this.resources = new OpenHashSet<Disposable>(resources.length + 1);
-        for (Disposable d : resources) {
-            Objects.requireNonNull(d, "Disposable item is null");
+
+    /**
+     * Creates a CompositeDisposables with the given array of initial elements.
+     * @param disposables the array of Disposables to start with
+     * @throws NullPointerException if {@code disposables} or any of its array items is null
+     */
+    public CompositeDisposable(@NonNull Disposable... disposables) {
+        ObjectHelper.requireNonNull(disposables, "disposables is null");
+        this.resources = new OpenHashSet<Disposable>(disposables.length + 1);
+        for (Disposable d : disposables) {
+            ObjectHelper.requireNonNull(d, "A Disposable in the disposables array is null");
             this.resources.add(d);
         }
     }
-    
-    public CompositeDisposable(Iterable<? extends Disposable> resources) {
-        Objects.requireNonNull(resources, "resources is null");
-        for (Disposable d : resources) {
-            Objects.requireNonNull(d, "Disposable item is null");
+
+    /**
+     * Creates a CompositeDisposables with the given Iterable sequence of initial elements.
+     * @param disposables the Iterable sequence of Disposables to start with
+     * @throws NullPointerException if {@code disposables} or any of its items is null
+     */
+    public CompositeDisposable(@NonNull Iterable<? extends Disposable> disposables) {
+        ObjectHelper.requireNonNull(disposables, "disposables is null");
+        this.resources = new OpenHashSet<Disposable>();
+        for (Disposable d : disposables) {
+            ObjectHelper.requireNonNull(d, "A Disposable item in the disposables sequence is null");
             this.resources.add(d);
         }
     }
-    
+
     @Override
     public void dispose() {
         if (disposed) {
@@ -62,18 +78,25 @@ public final class CompositeDisposable implements Disposable, DisposableContaine
             set = resources;
             resources = null;
         }
-        
+
         dispose(set);
     }
-    
+
     @Override
     public boolean isDisposed() {
         return disposed;
     }
-    
+
+    /**
+     * Adds a disposable to this container or disposes it if the
+     * container has been disposed.
+     * @param disposable the disposable to add, not null
+     * @return true if successful, false if this container has been disposed
+     * @throws NullPointerException if {@code disposable} is null
+     */
     @Override
-    public boolean add(Disposable d) {
-        Objects.requireNonNull(d, "d is null");
+    public boolean add(@NonNull Disposable disposable) {
+        ObjectHelper.requireNonNull(disposable, "disposable is null");
         if (!disposed) {
             synchronized (this) {
                 if (!disposed) {
@@ -82,51 +105,71 @@ public final class CompositeDisposable implements Disposable, DisposableContaine
                         set = new OpenHashSet<Disposable>();
                         resources = set;
                     }
-                    set.add(d);
+                    set.add(disposable);
                     return true;
                 }
             }
         }
-        d.dispose();
+        disposable.dispose();
         return false;
     }
 
-    public boolean addAll(Disposable... ds) {
-        Objects.requireNonNull(ds, "ds is null");
+    /**
+     * Atomically adds the given array of Disposables to the container or
+     * disposes them all if the container has been disposed.
+     * @param disposables the array of Disposables
+     * @return true if the operation was successful, false if the container has been disposed
+     * @throws NullPointerException if {@code disposables} or any of its array items is null
+     */
+    public boolean addAll(@NonNull Disposable... disposables) {
+        ObjectHelper.requireNonNull(disposables, "disposables is null");
         if (!disposed) {
             synchronized (this) {
                 if (!disposed) {
                     OpenHashSet<Disposable> set = resources;
                     if (set == null) {
-                        set = new OpenHashSet<Disposable>(ds.length + 1);
+                        set = new OpenHashSet<Disposable>(disposables.length + 1);
                         resources = set;
                     }
-                    for (Disposable d : ds) {
-                        Objects.requireNonNull(d, "d is null");
+                    for (Disposable d : disposables) {
+                        ObjectHelper.requireNonNull(d, "A Disposable in the disposables array is null");
                         set.add(d);
                     }
                     return true;
                 }
             }
         }
-        for (Disposable d : ds) {
+        for (Disposable d : disposables) {
             d.dispose();
         }
         return false;
     }
 
+    /**
+     * Removes and disposes the given disposable if it is part of this
+     * container.
+     * @param disposable the disposable to remove and dispose, not null
+     * @return true if the operation was successful
+     */
     @Override
-    public boolean remove(Disposable d) {
-        if (delete(d)) {
-            d.dispose();
+    public boolean remove(@NonNull Disposable disposable) {
+        if (delete(disposable)) {
+            disposable.dispose();
             return true;
         }
         return false;
     }
-    
+
+    /**
+     * Removes (but does not dispose) the given disposable if it is part of this
+     * container.
+     * @param disposable the disposable to remove, not null
+     * @return true if the operation was successful
+     * @throws NullPointerException if {@code disposable} is null
+     */
     @Override
-    public boolean delete(Disposable d) {
-        Objects.requireNonNull(d, "Disposable item is null");
+    public boolean delete(@NonNull Disposable disposable) {
+        ObjectHelper.requireNonNull(disposable, "disposables is null");
         if (disposed) {
             return false;
         }
@@ -134,15 +177,18 @@ public final class CompositeDisposable implements Disposable, DisposableContaine
             if (disposed) {
                 return false;
             }
-            
+
             OpenHashSet<Disposable> set = resources;
-            if (set == null || !set.remove(d)) {
+            if (set == null || !set.remove(disposable)) {
                 return false;
             }
         }
         return true;
     }
-    
+
+    /**
+     * Atomically clears the container, then disposes all the previously contained Disposables.
+     */
     public void clear() {
         if (disposed) {
             return;
@@ -152,14 +198,18 @@ public final class CompositeDisposable implements Disposable, DisposableContaine
             if (disposed) {
                 return;
             }
-            
+
             set = resources;
             resources = null;
         }
-        
+
         dispose(set);
     }
-    
+
+    /**
+     * Returns the number of currently held Disposables.
+     * @return the number of currently held Disposables
+     */
     public int size() {
         if (disposed) {
             return 0;
@@ -168,10 +218,16 @@ public final class CompositeDisposable implements Disposable, DisposableContaine
             if (disposed) {
                 return 0;
             }
-            return resources.size();
+            OpenHashSet<Disposable> set = resources;
+            return set != null ? set.size() : 0;
         }
     }
-    
+
+    /**
+     * Dispose the contents of the OpenHashSet by suppressing non-fatal
+     * Throwables till the end.
+     * @param set the OpenHashSet to dispose elements of
+     */
     void dispose(OpenHashSet<Disposable> set) {
         if (set == null) {
             return;
@@ -183,6 +239,7 @@ public final class CompositeDisposable implements Disposable, DisposableContaine
                 try {
                     ((Disposable) o).dispose();
                 } catch (Throwable ex) {
+                    Exceptions.throwIfFatal(ex);
                     if (errors == null) {
                         errors = new ArrayList<Throwable>();
                     }
@@ -192,7 +249,7 @@ public final class CompositeDisposable implements Disposable, DisposableContaine
         }
         if (errors != null) {
             if (errors.size() == 1) {
-                throw Exceptions.propagate(errors.get(0));
+                throw ExceptionHelper.wrapOrThrow(errors.get(0));
             }
             throw new CompositeException(errors);
         }

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,14 +13,17 @@
 
 package io.reactivex.internal.operators.flowable;
 
-import java.util.*;
+import java.util.Iterator;
 import java.util.concurrent.atomic.*;
 
 import org.reactivestreams.*;
 
-import io.reactivex.Flowable;
+import io.reactivex.*;
+import io.reactivex.annotations.*;
+import io.reactivex.exceptions.Exceptions;
 import io.reactivex.functions.Function;
-import io.reactivex.internal.functions.Objects;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.operators.flowable.FlowableMap.MapSubscriber;
 import io.reactivex.internal.queue.SpscLinkedArrayQueue;
 import io.reactivex.internal.subscriptions.*;
 import io.reactivex.internal.util.*;
@@ -32,43 +35,37 @@ import io.reactivex.plugins.RxJavaPlugins;
  * @param <T> the value type of the sources
  * @param <R> the result type
  */
-public final class FlowableCombineLatest<T, R> 
+public final class FlowableCombineLatest<T, R>
 extends Flowable<R> {
 
+    @Nullable
     final Publisher<? extends T>[] array;
 
+    @Nullable
     final Iterable<? extends Publisher<? extends T>> iterable;
 
-    final Function<Object[], ? extends R> combiner;
-    
+    final Function<? super Object[], ? extends R> combiner;
+
     final int bufferSize;
-    
+
     final boolean delayErrors;
 
-    public FlowableCombineLatest(Publisher<? extends T>[] array,
-            Function<Object[], ? extends R> combiner,
+    public FlowableCombineLatest(@NonNull Publisher<? extends T>[] array,
+                    @NonNull Function<? super Object[], ? extends R> combiner,
                     int bufferSize, boolean delayErrors) {
-        if (bufferSize <= 0) {
-            throw new IllegalArgumentException("BUFFER_SIZE > 0 required but it was " + bufferSize);
-        }
-
-        this.array = Objects.requireNonNull(array, "array");
+        this.array = array;
         this.iterable = null;
-        this.combiner = Objects.requireNonNull(combiner, "combiner");
+        this.combiner = combiner;
         this.bufferSize = bufferSize;
         this.delayErrors = delayErrors;
     }
-    
-    public FlowableCombineLatest(Iterable<? extends Publisher<? extends T>> iterable,
-            Function<Object[], ? extends R> combiner,
+
+    public FlowableCombineLatest(@NonNull Iterable<? extends Publisher<? extends T>> iterable,
+                    @NonNull Function<? super Object[], ? extends R> combiner,
                     int bufferSize, boolean delayErrors) {
-        if (bufferSize <= 0) {
-            throw new IllegalArgumentException("BUFFER_SIZE > 0 required but it was " + bufferSize);
-        }
-        
         this.array = null;
-        this.iterable = Objects.requireNonNull(iterable, "iterable");
-        this.combiner = Objects.requireNonNull(combiner, "combiner");
+        this.iterable = iterable;
+        this.combiner = combiner;
         this.bufferSize = bufferSize;
         this.delayErrors = delayErrors;
     }
@@ -85,14 +82,10 @@ extends Flowable<R> {
             Iterator<? extends Publisher<? extends T>> it;
 
             try {
-                it = iterable.iterator();
+                it = ObjectHelper.requireNonNull(iterable.iterator(), "The iterator returned is null");
             } catch (Throwable e) {
+                Exceptions.throwIfFatal(e);
                 EmptySubscription.error(e, s);
-                return;
-            }
-
-            if (it == null) {
-                EmptySubscription.error(new NullPointerException("The iterator returned is null"), s);
                 return;
             }
 
@@ -103,6 +96,7 @@ extends Flowable<R> {
                 try {
                     b = it.hasNext();
                 } catch (Throwable e) {
+                    Exceptions.throwIfFatal(e);
                     EmptySubscription.error(e, s);
                     return;
                 }
@@ -114,15 +108,10 @@ extends Flowable<R> {
                 Publisher<? extends T> p;
 
                 try {
-                    p = it.next();
+                    p = ObjectHelper.requireNonNull(it.next(), "The publisher returned by the iterator is null");
                 } catch (Throwable e) {
+                    Exceptions.throwIfFatal(e);
                     EmptySubscription.error(e, s);
-                    return;
-                }
-
-                if (p == null) {
-                    EmptySubscription.error(new NullPointerException("The Publisher returned by the iterator is " +
-                      "null"), s);
                     return;
                 }
 
@@ -143,60 +132,53 @@ extends Flowable<R> {
             return;
         }
         if (n == 1) {
-            new FlowableMap<T, R>((Publisher<T>)a[0], new Function<T, R>() {
-                @Override
-                public R apply(T t) {
-                    return combiner.apply(new Object[] { t });
-                }
-            }).subscribe(s);
+            ((Publisher<T>)a[0]).subscribe(new MapSubscriber<T, R>(s, new SingletonArrayFunc()));
             return;
         }
-        
-        
-        CombineLatestCoordinator<T, R> coordinator = 
+
+        CombineLatestCoordinator<T, R> coordinator =
                 new CombineLatestCoordinator<T, R>(s, combiner, n, bufferSize, delayErrors);
-        
+
         s.onSubscribe(coordinator);
-        
+
         coordinator.subscribe(a, n);
     }
-    
+
     static final class CombineLatestCoordinator<T, R>
     extends BasicIntQueueSubscription<R> {
 
-        /** */
         private static final long serialVersionUID = -5082275438355852221L;
 
-        final Subscriber<? super R> actual;
-        
-        final Function<Object[], ? extends R> combiner;
-        
+        final Subscriber<? super R> downstream;
+
+        final Function<? super Object[], ? extends R> combiner;
+
         final CombineLatestInnerSubscriber<T>[] subscribers;
-        
+
         final SpscLinkedArrayQueue<Object> queue;
-        
+
         final Object[] latest;
-        
+
         final boolean delayErrors;
-        
+
         boolean outputFused;
 
         int nonEmptySources;
-        
+
         int completedSources;
-        
+
         volatile boolean cancelled;
-        
+
         final AtomicLong requested;
-        
+
         volatile boolean done;
 
         final AtomicReference<Throwable> error;
-        
-        public CombineLatestCoordinator(Subscriber<? super R> actual, 
-                Function<Object[], ? extends R> combiner, int n,
+
+        CombineLatestCoordinator(Subscriber<? super R> actual,
+                Function<? super Object[], ? extends R> combiner, int n,
                 int bufferSize, boolean delayErrors) {
-            this.actual = actual;
+            this.downstream = actual;
             this.combiner = combiner;
             @SuppressWarnings("unchecked")
             CombineLatestInnerSubscriber<T>[] a = new CombineLatestInnerSubscriber[n];
@@ -227,7 +209,7 @@ extends Flowable<R> {
 
         void subscribe(Publisher<? extends T>[] sources, int n) {
             CombineLatestInnerSubscriber<T>[] a = subscribers;
-            
+
             for (int i = 0; i < n; i++) {
                 if (done || cancelled) {
                     return;
@@ -235,47 +217,47 @@ extends Flowable<R> {
                 sources[i].subscribe(a[i]);
             }
         }
-        
+
         void innerValue(int index, T value) {
-            
+
             boolean replenishInsteadOfDrain;
-            
+
             synchronized (this) {
                 Object[] os = latest;
 
                 int localNonEmptySources = nonEmptySources;
-                
+
                 if (os[index] == null) {
                     localNonEmptySources++;
                     nonEmptySources = localNonEmptySources;
                 }
-                
+
                 os[index] = value;
 
                 if (os.length == localNonEmptySources) {
-                    
+
                     queue.offer(subscribers[index], os.clone());
-                    
+
                     replenishInsteadOfDrain = false;
                 } else {
                     replenishInsteadOfDrain = true;
                 }
             }
-            
+
             if (replenishInsteadOfDrain) {
                 subscribers[index].requestOne();
             } else {
                 drain();
             }
         }
-        
+
         void innerComplete(int index) {
             synchronized (this) {
                 Object[] os = latest;
-                
+
                 if (os[index] != null) {
                     int localCompletedSources = completedSources + 1;
-                    
+
                     if (localCompletedSources == os.length) {
                         done = true;
                     } else {
@@ -288,10 +270,10 @@ extends Flowable<R> {
             }
             drain();
         }
-        
+
         void innerError(int index, Throwable e) {
-            
-            if (Exceptions.addThrowable(error, e)) {
+
+            if (ExceptionHelper.addThrowable(error, e)) {
                 if (!delayErrors) {
                     cancelAll();
                     done = true;
@@ -303,141 +285,142 @@ extends Flowable<R> {
                 RxJavaPlugins.onError(e);
             }
         }
-        
+
         void drainOutput() {
-            final Subscriber<? super R> a = actual;
+            final Subscriber<? super R> a = downstream;
             final SpscLinkedArrayQueue<Object> q = queue;
-            
+
             int missed = 1;
-            
+
             for (;;) {
-                
+
                 if (cancelled) {
                     q.clear();
                     return;
                 }
-                
+
                 Throwable ex = error.get();
                 if (ex != null) {
                     q.clear();
-                    
+
                     a.onError(ex);
                     return;
                 }
-                
+
                 boolean d = done;
-                
+
                 boolean empty = q.isEmpty();
-                
+
                 if (!empty) {
                     a.onNext(null);
                 }
-                
+
                 if (d && empty) {
                     a.onComplete();
                     return;
                 }
-                
+
                 missed = addAndGet(-missed);
                 if (missed == 0) {
                     break;
                 }
             }
         }
-        
+
         @SuppressWarnings("unchecked")
         void drainAsync() {
-            final Subscriber<? super R> a = actual;
+            final Subscriber<? super R> a = downstream;
             final SpscLinkedArrayQueue<Object> q = queue;
-            
+
             int missed = 1;
-            
+
             for (;;) {
-                
+
                 long r = requested.get();
                 long e = 0L;
-                
+
                 while (e != r) {
                     boolean d = done;
-                    
+
                     Object v = q.poll();
-                    
+
                     boolean empty = v == null;
-                    
+
                     if (checkTerminated(d, empty, a, q)) {
                         return;
                     }
-                    
+
                     if (empty) {
                         break;
                     }
-                    
+
                     T[] va = (T[])q.poll();
-                    
+
                     R w;
-                    
+
                     try {
-                        w = Objects.requireNonNull(combiner.apply(va), "The combiner returned a null value");
+                        w = ObjectHelper.requireNonNull(combiner.apply(va), "The combiner returned a null value");
                     } catch (Throwable ex) {
                         Exceptions.throwIfFatal(ex);
-                        
+
                         cancelAll();
-                        Exceptions.addThrowable(error, ex);
-                        ex = Exceptions.terminate(error);
+                        ExceptionHelper.addThrowable(error, ex);
+                        ex = ExceptionHelper.terminate(error);
 
                         a.onError(ex);
                         return;
                     }
-                    
+
                     a.onNext(w);
-                    
+
                     ((CombineLatestInnerSubscriber<T>)v).requestOne();
-                    
+
                     e++;
                 }
-                
+
                 if (e == r) {
                     if (checkTerminated(done, q.isEmpty(), a, q)) {
                         return;
                     }
                 }
-                
+
                 if (e != 0L && r != Long.MAX_VALUE) {
                     requested.addAndGet(-e);
                 }
-                
+
                 missed = addAndGet(-missed);
                 if (missed == 0) {
                     break;
                 }
             }
         }
-        
+
         void drain() {
             if (getAndIncrement() != 0) {
                 return;
             }
-            
+
             if (outputFused) {
                 drainOutput();
             } else {
                 drainAsync();
             }
         }
-        
-        boolean checkTerminated(boolean d, boolean empty, Subscriber<?> a, Queue<?> q) {
+
+        boolean checkTerminated(boolean d, boolean empty, Subscriber<?> a, SpscLinkedArrayQueue<?> q) {
             if (cancelled) {
                 cancelAll();
                 q.clear();
                 return true;
             }
-            
+
             if (d) {
                 if (delayErrors) {
                     if (empty) {
-                        Throwable e = Exceptions.terminate(error);
-                        
-                        if (e != null && e != Exceptions.TERMINATED) {
+                        cancelAll();
+                        Throwable e = ExceptionHelper.terminate(error);
+
+                        if (e != null && e != ExceptionHelper.TERMINATED) {
                             a.onError(e);
                         } else {
                             a.onComplete();
@@ -445,9 +428,9 @@ extends Flowable<R> {
                         return true;
                     }
                 } else {
-                    Throwable e = Exceptions.terminate(error);
-                    
-                    if (e != null && e != Exceptions.TERMINATED) {
+                    Throwable e = ExceptionHelper.terminate(error);
+
+                    if (e != null && e != ExceptionHelper.TERMINATED) {
                         cancelAll();
                         q.clear();
                         a.onError(e);
@@ -455,7 +438,7 @@ extends Flowable<R> {
                     } else
                     if (empty) {
                         cancelAll();
-    
+
                         a.onComplete();
                         return true;
                     }
@@ -463,13 +446,13 @@ extends Flowable<R> {
             }
             return false;
         }
-        
+
         void cancelAll() {
             for (CombineLatestInnerSubscriber<T> inner : subscribers) {
                 inner.cancel();
             }
         }
-        
+
         @Override
         public int requestFusion(int requestedMode) {
             if ((requestedMode & BOUNDARY) != 0) {
@@ -479,36 +462,36 @@ extends Flowable<R> {
             outputFused = m != 0;
             return m;
         }
-        
+
+        @Nullable
         @SuppressWarnings("unchecked")
         @Override
-        public R poll() {
+        public R poll() throws Exception {
             Object e = queue.poll();
             if (e == null) {
                 return null;
             }
             T[] a = (T[])queue.poll();
-            R r = combiner.apply(a);
+            R r = ObjectHelper.requireNonNull(combiner.apply(a), "The combiner returned a null value");
             ((CombineLatestInnerSubscriber<T>)e).requestOne();
             return r;
         }
-        
+
         @Override
         public void clear() {
             queue.clear();
         }
-        
+
         @Override
         public boolean isEmpty() {
             return queue.isEmpty();
         }
     }
-    
+
     static final class CombineLatestInnerSubscriber<T>
     extends AtomicReference<Subscription>
-            implements Subscriber<T> {
+            implements FlowableSubscriber<T> {
 
-        /** */
         private static final long serialVersionUID = -8730235182291002949L;
 
         final CombineLatestCoordinator<T, ?> parent;
@@ -516,12 +499,12 @@ extends Flowable<R> {
         final int index;
 
         final int prefetch;
-        
+
         final int limit;
-        
+
         int produced;
-        
-        public CombineLatestInnerSubscriber(CombineLatestCoordinator<T, ?> parent, int index, int prefetch) {
+
+        CombineLatestInnerSubscriber(CombineLatestCoordinator<T, ?> parent, int index, int prefetch) {
             this.parent = parent;
             this.index = index;
             this.prefetch = prefetch;
@@ -530,9 +513,7 @@ extends Flowable<R> {
 
         @Override
         public void onSubscribe(Subscription s) {
-            if (SubscriptionHelper.setOnce(this, s)) {
-                s.request(prefetch);
-            }
+            SubscriptionHelper.setOnce(this, s, prefetch);
         }
 
         @Override
@@ -549,13 +530,13 @@ extends Flowable<R> {
         public void onComplete() {
             parent.innerComplete(index);
         }
-        
+
         public void cancel() {
-            SubscriptionHelper.dispose(this);
+            SubscriptionHelper.cancel(this);
         }
-        
+
         public void requestOne() {
-            
+
             int p = produced + 1;
             if (p == limit) {
                 produced = 0;
@@ -563,7 +544,14 @@ extends Flowable<R> {
             } else {
                 produced = p;
             }
-            
+
+        }
+    }
+
+    final class SingletonArrayFunc implements Function<T, R> {
+        @Override
+        public R apply(T t) throws Exception {
+            return combiner.apply(new Object[] { t });
         }
     }
 }

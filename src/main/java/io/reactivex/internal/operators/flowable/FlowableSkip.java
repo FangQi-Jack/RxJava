@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -15,14 +15,13 @@ package io.reactivex.internal.operators.flowable;
 
 import org.reactivestreams.*;
 
-import io.reactivex.Flowable;
+import io.reactivex.*;
 import io.reactivex.internal.subscriptions.SubscriptionHelper;
 
-public final class FlowableSkip<T> extends Flowable<T> {
-    final Publisher<T> source;
+public final class FlowableSkip<T> extends AbstractFlowableWithUpstream<T, T> {
     final long n;
-    public FlowableSkip(Publisher<T> source, long n) {
-        this.source = source;
+    public FlowableSkip(Flowable<T> source, long n) {
+        super(source);
         this.n = n;
     }
 
@@ -30,55 +29,55 @@ public final class FlowableSkip<T> extends Flowable<T> {
     protected void subscribeActual(Subscriber<? super T> s) {
         source.subscribe(new SkipSubscriber<T>(s, n));
     }
-    
-    static final class SkipSubscriber<T> implements Subscriber<T>, Subscription {
-        final Subscriber<? super T> actual;
+
+    static final class SkipSubscriber<T> implements FlowableSubscriber<T>, Subscription {
+        final Subscriber<? super T> downstream;
         long remaining;
-        
-        Subscription s;
-        
-        public SkipSubscriber(Subscriber<? super T> actual, long n) {
-            this.actual = actual;
+
+        Subscription upstream;
+
+        SkipSubscriber(Subscriber<? super T> actual, long n) {
+            this.downstream = actual;
             this.remaining = n;
         }
-        
+
         @Override
         public void onSubscribe(Subscription s) {
-            if (SubscriptionHelper.validate(this.s, s)) {
+            if (SubscriptionHelper.validate(this.upstream, s)) {
                 long n = remaining;
-                this.s = s;
-                actual.onSubscribe(this);
+                this.upstream = s;
+                downstream.onSubscribe(this);
                 s.request(n);
             }
         }
-        
+
         @Override
         public void onNext(T t) {
             if (remaining != 0L) {
                 remaining--;
             } else {
-                actual.onNext(t);
+                downstream.onNext(t);
             }
         }
-        
+
         @Override
         public void onError(Throwable t) {
-            actual.onError(t);
+            downstream.onError(t);
         }
-        
+
         @Override
         public void onComplete() {
-            actual.onComplete();
+            downstream.onComplete();
         }
-        
+
         @Override
         public void request(long n) {
-            s.request(n);
+            upstream.request(n);
         }
-        
+
         @Override
         public void cancel() {
-            s.cancel();
+            upstream.cancel();
         }
     }
 }

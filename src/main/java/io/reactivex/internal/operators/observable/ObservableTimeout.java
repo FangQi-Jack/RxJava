@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -14,354 +14,365 @@
 package io.reactivex.internal.operators.observable;
 
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.*;
 
 import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
-import io.reactivex.functions.*;
+import io.reactivex.exceptions.Exceptions;
+import io.reactivex.functions.Function;
 import io.reactivex.internal.disposables.*;
-import io.reactivex.internal.subscribers.observable.*;
-import io.reactivex.observers.SerializedObserver;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.operators.observable.ObservableTimeoutTimed.TimeoutSupport;
 import io.reactivex.plugins.RxJavaPlugins;
 
-public final class ObservableTimeout<T, U, V> extends ObservableSource<T, T> {
-    final Supplier<? extends ObservableConsumable<U>> firstTimeoutSelector; 
-    final Function<? super T, ? extends ObservableConsumable<V>> timeoutSelector; 
-    final ObservableConsumable<? extends T> other;
+public final class ObservableTimeout<T, U, V> extends AbstractObservableWithUpstream<T, T> {
+    final ObservableSource<U> firstTimeoutIndicator;
+    final Function<? super T, ? extends ObservableSource<V>> itemTimeoutIndicator;
+    final ObservableSource<? extends T> other;
 
     public ObservableTimeout(
-            ObservableConsumable<T> source, 
-            Supplier<? extends ObservableConsumable<U>> firstTimeoutSelector,
-            Function<? super T, ? extends ObservableConsumable<V>> timeoutSelector, 
-                    ObservableConsumable<? extends T> other) {
+            Observable<T> source,
+            ObservableSource<U> firstTimeoutIndicator,
+            Function<? super T, ? extends ObservableSource<V>> itemTimeoutIndicator,
+            ObservableSource<? extends T> other) {
         super(source);
-        this.firstTimeoutSelector = firstTimeoutSelector;
-        this.timeoutSelector = timeoutSelector;
+        this.firstTimeoutIndicator = firstTimeoutIndicator;
+        this.itemTimeoutIndicator = itemTimeoutIndicator;
         this.other = other;
     }
 
     @Override
-    public void subscribeActual(Observer<? super T> t) {
+    protected void subscribeActual(Observer<? super T> observer) {
         if (other == null) {
-            source.subscribe(new TimeoutSubscriber<T, U, V>(
-                    new SerializedObserver<T>(t), 
-                    firstTimeoutSelector, timeoutSelector));
+            TimeoutObserver<T> parent = new TimeoutObserver<T>(observer, itemTimeoutIndicator);
+            observer.onSubscribe(parent);
+            parent.startFirstTimeout(firstTimeoutIndicator);
+            source.subscribe(parent);
         } else {
-            source.subscribe(new TimeoutOtherSubscriber<T, U, V>(
-                    t, firstTimeoutSelector, timeoutSelector, other));
+            TimeoutFallbackObserver<T> parent = new TimeoutFallbackObserver<T>(observer, itemTimeoutIndicator, other);
+            observer.onSubscribe(parent);
+            parent.startFirstTimeout(firstTimeoutIndicator);
+            source.subscribe(parent);
         }
     }
-    
-    static final class TimeoutSubscriber<T, U, V>
-    extends AtomicReference<Disposable>
-    implements Observer<T>, Disposable, OnTimeout {
-        /** */
-        private static final long serialVersionUID = 2672739326310051084L;
-        final Observer<? super T> actual;
-        final Supplier<? extends ObservableConsumable<U>> firstTimeoutSelector; 
-        final Function<? super T, ? extends ObservableConsumable<V>> timeoutSelector; 
 
-        Disposable s;
-        
-        volatile long index;
-        
-        public TimeoutSubscriber(Observer<? super T> actual,
-                Supplier<? extends ObservableConsumable<U>> firstTimeoutSelector,
-                Function<? super T, ? extends ObservableConsumable<V>> timeoutSelector) {
-            this.actual = actual;
-            this.firstTimeoutSelector = firstTimeoutSelector;
-            this.timeoutSelector = timeoutSelector;
+    interface TimeoutSelectorSupport extends TimeoutSupport {
+        void onTimeoutError(long idx, Throwable ex);
+    }
+
+    static final class TimeoutObserver<T> extends AtomicLong
+    implements Observer<T>, Disposable, TimeoutSelectorSupport {
+
+        private static final long serialVersionUID = 3764492702657003550L;
+
+        final Observer<? super T> downstream;
+
+        final Function<? super T, ? extends ObservableSource<?>> itemTimeoutIndicator;
+
+        final SequentialDisposable task;
+
+        final AtomicReference<Disposable> upstream;
+
+        TimeoutObserver(Observer<? super T> actual, Function<? super T, ? extends ObservableSource<?>> itemTimeoutIndicator) {
+            this.downstream = actual;
+            this.itemTimeoutIndicator = itemTimeoutIndicator;
+            this.task = new SequentialDisposable();
+            this.upstream = new AtomicReference<Disposable>();
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                
-                Observer<? super T> a = actual;
-                
-                ObservableConsumable<U> p;
-                
-                if (firstTimeoutSelector != null) {
-                    try {
-                        p = firstTimeoutSelector.get();
-                    } catch (Throwable ex) {
-                        dispose();
-                        EmptyDisposable.error(ex, a);
-                        return;
-                    }
-                    
-                    if (p == null) {
-                        dispose();
-                        EmptyDisposable.error(new NullPointerException("The first timeout NbpObservable is null"), a);
-                        return;
-                    }
-                    
-                    TimeoutInnerSubscriber<T, U, V> tis = new TimeoutInnerSubscriber<T, U, V>(this, 0);
-                    
-                    if (compareAndSet(null, tis)) {
-                        a.onSubscribe(this);
-                        p.subscribe(tis);
-                    }
-                } else {
-                    a.onSubscribe(this);
-                }
-            }
+        public void onSubscribe(Disposable d) {
+            DisposableHelper.setOnce(upstream, d);
         }
-        
+
         @Override
         public void onNext(T t) {
-            long idx = index + 1;
-            index = idx;
+            long idx = get();
+            if (idx == Long.MAX_VALUE || !compareAndSet(idx, idx + 1)) {
+                return;
+            }
 
-            actual.onNext(t);
-            
-            Disposable d = get();
+            Disposable d = task.get();
             if (d != null) {
                 d.dispose();
             }
-            
-            ObservableConsumable<V> p;
-            
+
+            downstream.onNext(t);
+
+            ObservableSource<?> itemTimeoutObservableSource;
+
             try {
-                p = timeoutSelector.apply(t);
-            } catch (Throwable e) {
-                dispose();
-                actual.onError(e);
+                itemTimeoutObservableSource = ObjectHelper.requireNonNull(
+                        itemTimeoutIndicator.apply(t),
+                        "The itemTimeoutIndicator returned a null ObservableSource.");
+            } catch (Throwable ex) {
+                Exceptions.throwIfFatal(ex);
+                upstream.get().dispose();
+                getAndSet(Long.MAX_VALUE);
+                downstream.onError(ex);
                 return;
             }
-            
-            if (p == null) {
-                dispose();
-                actual.onError(new NullPointerException("The NbpObservable returned is null"));
-                return;
-            }
-            
-            TimeoutInnerSubscriber<T, U, V> tis = new TimeoutInnerSubscriber<T, U, V>(this, idx);
-            
-            if (compareAndSet(d, tis)) {
-                p.subscribe(tis);
+
+            TimeoutConsumer consumer = new TimeoutConsumer(idx + 1, this);
+            if (task.replace(consumer)) {
+                itemTimeoutObservableSource.subscribe(consumer);
             }
         }
-        
+
+        void startFirstTimeout(ObservableSource<?> firstTimeoutIndicator) {
+            if (firstTimeoutIndicator != null) {
+                TimeoutConsumer consumer = new TimeoutConsumer(0L, this);
+                if (task.replace(consumer)) {
+                    firstTimeoutIndicator.subscribe(consumer);
+                }
+            }
+        }
+
         @Override
         public void onError(Throwable t) {
-            dispose();
-            actual.onError(t);
+            if (getAndSet(Long.MAX_VALUE) != Long.MAX_VALUE) {
+                task.dispose();
+
+                downstream.onError(t);
+            } else {
+                RxJavaPlugins.onError(t);
+            }
         }
-        
+
         @Override
         public void onComplete() {
-            dispose();
-            actual.onComplete();
+            if (getAndSet(Long.MAX_VALUE) != Long.MAX_VALUE) {
+                task.dispose();
+
+                downstream.onComplete();
+            }
         }
-        
+
+        @Override
+        public void onTimeout(long idx) {
+            if (compareAndSet(idx, Long.MAX_VALUE)) {
+                DisposableHelper.dispose(upstream);
+
+                downstream.onError(new TimeoutException());
+            }
+        }
+
+        @Override
+        public void onTimeoutError(long idx, Throwable ex) {
+            if (compareAndSet(idx, Long.MAX_VALUE)) {
+                DisposableHelper.dispose(upstream);
+
+                downstream.onError(ex);
+            } else {
+                RxJavaPlugins.onError(ex);
+            }
+        }
+
         @Override
         public void dispose() {
-            if (DisposableHelper.dispose(this)) {
-                s.dispose();
-            }
+            DisposableHelper.dispose(upstream);
+            task.dispose();
         }
 
         @Override
         public boolean isDisposed() {
-            return s.isDisposed();
+            return DisposableHelper.isDisposed(upstream.get());
+        }
+    }
+
+    static final class TimeoutFallbackObserver<T>
+    extends AtomicReference<Disposable>
+    implements Observer<T>, Disposable, TimeoutSelectorSupport {
+
+        private static final long serialVersionUID = -7508389464265974549L;
+
+        final Observer<? super T> downstream;
+
+        final Function<? super T, ? extends ObservableSource<?>> itemTimeoutIndicator;
+
+        final SequentialDisposable task;
+
+        final AtomicLong index;
+
+        final AtomicReference<Disposable> upstream;
+
+        ObservableSource<? extends T> fallback;
+
+        TimeoutFallbackObserver(Observer<? super T> actual,
+                Function<? super T, ? extends ObservableSource<?>> itemTimeoutIndicator,
+                        ObservableSource<? extends T> fallback) {
+            this.downstream = actual;
+            this.itemTimeoutIndicator = itemTimeoutIndicator;
+            this.task = new SequentialDisposable();
+            this.fallback = fallback;
+            this.index = new AtomicLong();
+            this.upstream = new AtomicReference<Disposable>();
         }
 
         @Override
-        public void timeout(long idx) {
-            if (idx == index) {
-                dispose();
-                actual.onError(new TimeoutException());
+        public void onSubscribe(Disposable d) {
+            DisposableHelper.setOnce(upstream, d);
+        }
+
+        @Override
+        public void onNext(T t) {
+            long idx = index.get();
+            if (idx == Long.MAX_VALUE || !index.compareAndSet(idx, idx + 1)) {
+                return;
+            }
+
+            Disposable d = task.get();
+            if (d != null) {
+                d.dispose();
+            }
+
+            downstream.onNext(t);
+
+            ObservableSource<?> itemTimeoutObservableSource;
+
+            try {
+                itemTimeoutObservableSource = ObjectHelper.requireNonNull(
+                        itemTimeoutIndicator.apply(t),
+                        "The itemTimeoutIndicator returned a null ObservableSource.");
+            } catch (Throwable ex) {
+                Exceptions.throwIfFatal(ex);
+                upstream.get().dispose();
+                index.getAndSet(Long.MAX_VALUE);
+                downstream.onError(ex);
+                return;
+            }
+
+            TimeoutConsumer consumer = new TimeoutConsumer(idx + 1, this);
+            if (task.replace(consumer)) {
+                itemTimeoutObservableSource.subscribe(consumer);
             }
         }
-    }
-    
-    interface OnTimeout {
-        void timeout(long index);
-        
-        void onError(Throwable e);
-    }
-    
-    static final class TimeoutInnerSubscriber<T, U, V> extends DisposableObserver<Object> {
-        final OnTimeout parent;
-        final long index;
-        
-        boolean done;
-        
-        public TimeoutInnerSubscriber(OnTimeout parent, final long index) {
-            this.parent = parent;
-            this.index = index;
+
+        void startFirstTimeout(ObservableSource<?> firstTimeoutIndicator) {
+            if (firstTimeoutIndicator != null) {
+                TimeoutConsumer consumer = new TimeoutConsumer(0L, this);
+                if (task.replace(consumer)) {
+                    firstTimeoutIndicator.subscribe(consumer);
+                }
+            }
         }
-        
+
+        @Override
+        public void onError(Throwable t) {
+            if (index.getAndSet(Long.MAX_VALUE) != Long.MAX_VALUE) {
+                task.dispose();
+
+                downstream.onError(t);
+
+                task.dispose();
+            } else {
+                RxJavaPlugins.onError(t);
+            }
+        }
+
+        @Override
+        public void onComplete() {
+            if (index.getAndSet(Long.MAX_VALUE) != Long.MAX_VALUE) {
+                task.dispose();
+
+                downstream.onComplete();
+
+                task.dispose();
+            }
+        }
+
+        @Override
+        public void onTimeout(long idx) {
+            if (index.compareAndSet(idx, Long.MAX_VALUE)) {
+                DisposableHelper.dispose(upstream);
+
+                ObservableSource<? extends T> f = fallback;
+                fallback = null;
+
+                f.subscribe(new ObservableTimeoutTimed.FallbackObserver<T>(downstream, this));
+            }
+        }
+
+        @Override
+        public void onTimeoutError(long idx, Throwable ex) {
+            if (index.compareAndSet(idx, Long.MAX_VALUE)) {
+                DisposableHelper.dispose(this);
+
+                downstream.onError(ex);
+            } else {
+                RxJavaPlugins.onError(ex);
+            }
+        }
+
+        @Override
+        public void dispose() {
+            DisposableHelper.dispose(upstream);
+            DisposableHelper.dispose(this);
+            task.dispose();
+        }
+
+        @Override
+        public boolean isDisposed() {
+            return DisposableHelper.isDisposed(get());
+        }
+    }
+
+    static final class TimeoutConsumer extends AtomicReference<Disposable>
+    implements Observer<Object>, Disposable {
+
+        private static final long serialVersionUID = 8708641127342403073L;
+
+        final TimeoutSelectorSupport parent;
+
+        final long idx;
+
+        TimeoutConsumer(long idx, TimeoutSelectorSupport parent) {
+            this.idx = idx;
+            this.parent = parent;
+        }
+
+        @Override
+        public void onSubscribe(Disposable d) {
+            DisposableHelper.setOnce(this, d);
+        }
+
         @Override
         public void onNext(Object t) {
-            if (done) {
-                return;
-            }
-            done = true;
-            dispose();
-            parent.timeout(index);
-        }
-        
-        @Override
-        public void onError(Throwable t) {
-            parent.onError(t);
-        }
-        
-        @Override
-        public void onComplete() {
-            if (done) {
-                return;
-            }
-            done = true;
-            parent.timeout(index);
-        }
-    }
-    
-    static final class TimeoutOtherSubscriber<T, U, V>
-    extends AtomicReference<Disposable>
-    implements Observer<T>, Disposable, OnTimeout {
-        /** */
-        private static final long serialVersionUID = -1957813281749686898L;
-        final Observer<? super T> actual;
-        final Supplier<? extends ObservableConsumable<U>> firstTimeoutSelector; 
-        final Function<? super T, ? extends ObservableConsumable<V>> timeoutSelector;
-        final ObservableConsumable<? extends T> other;
-        final NbpFullArbiter<T> arbiter;
-        
-        Disposable s;
-        
-        boolean done;
-        
-        volatile long index;
-        
-        public TimeoutOtherSubscriber(Observer<? super T> actual,
-                Supplier<? extends ObservableConsumable<U>> firstTimeoutSelector,
-                Function<? super T, ? extends ObservableConsumable<V>> timeoutSelector, ObservableConsumable<? extends T> other) {
-            this.actual = actual;
-            this.firstTimeoutSelector = firstTimeoutSelector;
-            this.timeoutSelector = timeoutSelector;
-            this.other = other;
-            this.arbiter = new NbpFullArbiter<T>(actual, this, 8);
-        }
-        
-        @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                
-                if (!arbiter.setSubscription(s)) {
-                    return;
-                }
-                Observer<? super T> a = actual;
-                
-                if (firstTimeoutSelector != null) {
-                    ObservableConsumable<U> p;
-                    
-                    try {
-                        p = firstTimeoutSelector.get();
-                    } catch (Throwable ex) {
-                        dispose();
-                        EmptyDisposable.error(ex, a);
-                        return;
-                    }
-                    
-                    if (p == null) {
-                        dispose();
-                        EmptyDisposable.error(new NullPointerException("The first timeout NbpObservable is null"), a);
-                        return;
-                    }
-                    
-                    TimeoutInnerSubscriber<T, U, V> tis = new TimeoutInnerSubscriber<T, U, V>(this, 0);
-                    
-                    if (compareAndSet(null, tis)) {
-                        a.onSubscribe(arbiter);
-                        p.subscribe(tis);
-                    }
-                } else {
-                    a.onSubscribe(arbiter);
-                }
+            Disposable upstream = get();
+            if (upstream != DisposableHelper.DISPOSED) {
+                upstream.dispose();
+                lazySet(DisposableHelper.DISPOSED);
+                parent.onTimeout(idx);
             }
         }
-        
-        @Override
-        public void onNext(T t) {
-            if (done) {
-                return;
-            }
-            long idx = index + 1;
-            index = idx;
 
-            if (!arbiter.onNext(t, s)) {
-                return;
-            }
-            
-            Disposable d = get();
-            if (d != null) {
-                d.dispose();
-            }
-            
-            ObservableConsumable<V> p;
-            
-            try {
-                p = timeoutSelector.apply(t);
-            } catch (Throwable e) {
-                actual.onError(e);
-                return;
-            }
-            
-            if (p == null) {
-                actual.onError(new NullPointerException("The NbpObservable returned is null"));
-                return;
-            }
-            
-            TimeoutInnerSubscriber<T, U, V> tis = new TimeoutInnerSubscriber<T, U, V>(this, idx);
-            
-            if (compareAndSet(d, tis)) {
-                p.subscribe(tis);
-            }
-        }
-        
         @Override
         public void onError(Throwable t) {
-            if (done) {
+            if (get() != DisposableHelper.DISPOSED) {
+                lazySet(DisposableHelper.DISPOSED);
+                parent.onTimeoutError(idx, t);
+            } else {
                 RxJavaPlugins.onError(t);
-                return;
             }
-            done = true;
-            dispose();
-            arbiter.onError(t, s);
         }
-        
+
         @Override
         public void onComplete() {
-            if (done) {
-                return;
+            if (get() != DisposableHelper.DISPOSED) {
+                lazySet(DisposableHelper.DISPOSED);
+                parent.onTimeout(idx);
             }
-            done = true;
-            dispose();
-            arbiter.onComplete(s);
         }
-        
+
         @Override
         public void dispose() {
-            if (DisposableHelper.dispose(this)) {
-                s.dispose();
-            }
+            DisposableHelper.dispose(this);
         }
 
         @Override
         public boolean isDisposed() {
-            return s.isDisposed();
-        }
-
-        @Override
-        public void timeout(long idx) {
-            if (idx == index) {
-                dispose();
-                other.subscribe(new FullArbiterObserver<T>(arbiter));
-            }
+            return DisposableHelper.isDisposed(this.get());
         }
     }
+
 }

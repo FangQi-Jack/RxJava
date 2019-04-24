@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,79 +13,81 @@
 
 package io.reactivex.internal.operators.single;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import io.reactivex.*;
-import io.reactivex.disposables.*;
-import io.reactivex.exceptions.CompositeException;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.exceptions.*;
 import io.reactivex.functions.Function;
+import io.reactivex.internal.disposables.DisposableHelper;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.observers.ResumeSingleObserver;
 
 public final class SingleResumeNext<T> extends Single<T> {
-    final SingleConsumable<? extends T> source;
-    
-    final Function<? super Throwable, ? extends SingleConsumable<? extends T>> nextFunction;
-    
-    public SingleResumeNext(SingleConsumable<? extends T> source,
-            Function<? super Throwable, ? extends SingleConsumable<? extends T>> nextFunction) {
+    final SingleSource<? extends T> source;
+
+    final Function<? super Throwable, ? extends SingleSource<? extends T>> nextFunction;
+
+    public SingleResumeNext(SingleSource<? extends T> source,
+            Function<? super Throwable, ? extends SingleSource<? extends T>> nextFunction) {
         this.source = source;
         this.nextFunction = nextFunction;
     }
 
     @Override
-    protected void subscribeActual(final SingleSubscriber<? super T> s) {
-
-        final SerialDisposable sd = new SerialDisposable();
-        s.onSubscribe(sd);
-        
-        source.subscribe(new SingleSubscriber<T>() {
-
-            @Override
-            public void onSubscribe(Disposable d) {
-                sd.replace(d);
-            }
-
-            @Override
-            public void onSuccess(T value) {
-                s.onSuccess(value);
-            }
-
-            @Override
-            public void onError(Throwable e) {
-                SingleConsumable<? extends T> next;
-                
-                try {
-                    next = nextFunction.apply(e);
-                } catch (Throwable ex) {
-                    s.onError(new CompositeException(ex, e));
-                    return;
-                }
-                
-                if (next == null) {
-                    NullPointerException npe = new NullPointerException("The next Single supplied was null");
-                    npe.initCause(e);
-                    s.onError(npe);
-                    return;
-                }
-                
-                next.subscribe(new SingleSubscriber<T>() {
-
-                    @Override
-                    public void onSubscribe(Disposable d) {
-                        sd.replace(d);
-                    }
-
-                    @Override
-                    public void onSuccess(T value) {
-                        s.onSuccess(value);
-                    }
-
-                    @Override
-                    public void onError(Throwable e) {
-                        s.onError(e);
-                    }
-                    
-                });
-            }
-            
-        });
+    protected void subscribeActual(final SingleObserver<? super T> observer) {
+        source.subscribe(new ResumeMainSingleObserver<T>(observer, nextFunction));
     }
 
+    static final class ResumeMainSingleObserver<T> extends AtomicReference<Disposable>
+    implements SingleObserver<T>, Disposable {
+        private static final long serialVersionUID = -5314538511045349925L;
+
+        final SingleObserver<? super T> downstream;
+
+        final Function<? super Throwable, ? extends SingleSource<? extends T>> nextFunction;
+
+        ResumeMainSingleObserver(SingleObserver<? super T> actual,
+                Function<? super Throwable, ? extends SingleSource<? extends T>> nextFunction) {
+            this.downstream = actual;
+            this.nextFunction = nextFunction;
+        }
+
+        @Override
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.setOnce(this, d)) {
+                downstream.onSubscribe(this);
+            }
+        }
+
+        @Override
+        public void onSuccess(T value) {
+            downstream.onSuccess(value);
+        }
+
+        @Override
+        public void onError(Throwable e) {
+            SingleSource<? extends T> source;
+
+            try {
+                source = ObjectHelper.requireNonNull(nextFunction.apply(e), "The nextFunction returned a null SingleSource.");
+            } catch (Throwable ex) {
+                Exceptions.throwIfFatal(ex);
+                downstream.onError(new CompositeException(e, ex));
+                return;
+            }
+
+            source.subscribe(new ResumeSingleObserver<T>(this, downstream));
+        }
+
+        @Override
+        public void dispose() {
+            DisposableHelper.dispose(this);
+        }
+
+        @Override
+        public boolean isDisposed() {
+            return DisposableHelper.isDisposed(get());
+        }
+    }
 }

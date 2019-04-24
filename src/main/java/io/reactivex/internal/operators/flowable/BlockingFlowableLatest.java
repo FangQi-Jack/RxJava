@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -20,58 +20,50 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.reactivestreams.Publisher;
 
 import io.reactivex.*;
-import io.reactivex.Optional;
-import io.reactivex.internal.subscribers.flowable.DisposableSubscriber;
-import io.reactivex.internal.util.Exceptions;
+import io.reactivex.internal.util.*;
+import io.reactivex.plugins.RxJavaPlugins;
+import io.reactivex.subscribers.DisposableSubscriber;
 
 /**
  * Wait for and iterate over the latest values of the source observable. If the source works faster than the
- * iterator, values may be skipped, but not the {@code onError} or {@code onCompleted} events.
+ * iterator, values may be skipped, but not the {@code onError} or {@code onComplete} events.
+ * @param <T> the value type emitted
  */
-public enum BlockingFlowableLatest {
-    ;
+public final class BlockingFlowableLatest<T> implements Iterable<T> {
 
-    /**
-     * Returns an {@code Iterable} that blocks until or unless the {@code Observable} emits an item that has not
-     * been returned by the {@code Iterable}, then returns that item
-     *
-     * @param <T> the value type
-     * @param source
-     *            the source {@code Observable}
-     * @return an {@code Iterable} that blocks until or unless the {@code Observable} emits an item that has not
-     *         been returned by the {@code Iterable}, then returns that item
-     */
-    public static <T> Iterable<T> latest(final Publisher<? extends T> source) {
-        return new Iterable<T>() {
-            @Override
-            public Iterator<T> iterator() {
-                LatestObserverIterator<T> lio = new LatestObserverIterator<T>();
-                Flowable.<T>fromPublisher(source).materialize().subscribe(lio);
-                return lio;
-            }
-        };
+    final Publisher<? extends T> source;
+
+    public BlockingFlowableLatest(Publisher<? extends T> source) {
+        this.source = source;
     }
 
-    /** Observer of source, iterator for output. */
-    static final class LatestObserverIterator<T> extends DisposableSubscriber<Try<Optional<T>>> implements Iterator<T> {
+    @Override
+    public Iterator<T> iterator() {
+        LatestSubscriberIterator<T> lio = new LatestSubscriberIterator<T>();
+        Flowable.<T>fromPublisher(source).materialize().subscribe(lio);
+        return lio;
+    }
+
+    /** Subscriber of source, iterator for output. */
+    static final class LatestSubscriberIterator<T> extends DisposableSubscriber<Notification<T>> implements Iterator<T> {
         final Semaphore notify = new Semaphore(0);
         // observer's notification
-        final AtomicReference<Try<Optional<T>>> value = new AtomicReference<Try<Optional<T>>>();
+        final AtomicReference<Notification<T>> value = new AtomicReference<Notification<T>>();
 
         // iterator's notification
-        Try<Optional<T>> iNotif;
+        Notification<T> iteratorNotification;
 
         @Override
-        public void onNext(Try<Optional<T>> args) {
-            boolean wasntAvailable = value.getAndSet(args) == null;
-            if (wasntAvailable) {
+        public void onNext(Notification<T> args) {
+            boolean wasNotAvailable = value.getAndSet(args) == null;
+            if (wasNotAvailable) {
                 notify.release();
             }
         }
 
         @Override
         public void onError(Throwable e) {
-            // not expected
+            RxJavaPlugins.onError(e);
         }
 
         @Override
@@ -81,36 +73,36 @@ public enum BlockingFlowableLatest {
 
         @Override
         public boolean hasNext() {
-            if (iNotif != null && iNotif.hasError()) {
-                throw Exceptions.propagate(iNotif.error());
+            if (iteratorNotification != null && iteratorNotification.isOnError()) {
+                throw ExceptionHelper.wrapOrThrow(iteratorNotification.getError());
             }
-            if (iNotif == null || iNotif.value().isPresent()) {
-                if (iNotif == null) {
+            if (iteratorNotification == null || iteratorNotification.isOnNext()) {
+                if (iteratorNotification == null) {
                     try {
+                        BlockingHelper.verifyNonBlocking();
                         notify.acquire();
                     } catch (InterruptedException ex) {
                         dispose();
-                        Thread.currentThread().interrupt();
-                        iNotif = Notification.error(ex);
-                        throw Exceptions.propagate(ex);
+                        iteratorNotification = Notification.createOnError(ex);
+                        throw ExceptionHelper.wrapOrThrow(ex);
                     }
 
-                    Try<Optional<T>> n = value.getAndSet(null);
-                    iNotif = n;
-                    if (iNotif.hasError()) {
-                        throw Exceptions.propagate(iNotif.error());
+                    Notification<T> n = value.getAndSet(null);
+                    iteratorNotification = n;
+                    if (n.isOnError()) {
+                        throw ExceptionHelper.wrapOrThrow(n.getError());
                     }
                 }
             }
-            return iNotif.value().isPresent();
+            return iteratorNotification.isOnNext();
         }
 
         @Override
         public T next() {
             if (hasNext()) {
-                if (iNotif.value().isPresent()) {
-                    T v = iNotif.value().get();
-                    iNotif = null;
+                if (iteratorNotification.isOnNext()) {
+                    T v = iteratorNotification.getValue();
+                    iteratorNotification = null;
                     return v;
                 }
             }

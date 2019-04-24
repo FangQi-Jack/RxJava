@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -24,18 +24,11 @@ import org.reactivestreams.*;
 
 import io.reactivex.*;
 import io.reactivex.internal.schedulers.IoScheduler;
-import io.reactivex.internal.subscriptions.*;
+import io.reactivex.internal.subscriptions.BooleanSubscription;
 import io.reactivex.schedulers.Schedulers;
 import io.reactivex.subscribers.TestSubscriber;
 
 public class FlowableMergeMaxConcurrentTest {
-
-    Subscriber<String> stringObserver;
-
-    @Before
-    public void before() {
-        stringObserver = TestHelper.mockSubscriber();
-    }
 
     @Test
     public void testWhenMaxConcurrentIsOne() {
@@ -46,7 +39,7 @@ public class FlowableMergeMaxConcurrentTest {
             os.add(Flowable.just("one", "two", "three", "four", "five").subscribeOn(Schedulers.newThread()));
 
             List<String> expected = Arrays.asList("one", "two", "three", "four", "five", "one", "two", "three", "four", "five", "one", "two", "three", "four", "five");
-            Iterator<String> iter = Flowable.merge(os, 1).toBlocking().iterator();
+            Iterator<String> iter = Flowable.merge(os, 1).blockingIterable().iterator();
             List<String> actual = new ArrayList<String>();
             while (iter.hasNext()) {
                 actual.add(iter.next());
@@ -68,10 +61,10 @@ public class FlowableMergeMaxConcurrentTest {
             for (int i = 0; i < observableCount; i++) {
                 SubscriptionCheckObservable sco = new SubscriptionCheckObservable(subscriptionCount, maxConcurrent);
                 scos.add(sco);
-                os.add(Flowable.create(sco));
+                os.add(Flowable.unsafeCreate(sco));
             }
 
-            Iterator<String> iter = Flowable.merge(os, maxConcurrent).toBlocking().iterator();
+            Iterator<String> iter = Flowable.merge(os, maxConcurrent).blockingIterable().iterator();
             List<String> actual = new ArrayList<String>();
             while (iter.hasNext()) {
                 actual.add(iter.next());
@@ -88,7 +81,7 @@ public class FlowableMergeMaxConcurrentTest {
 
         private final AtomicInteger subscriptionCount;
         private final int maxConcurrent;
-        volatile boolean failed = false;
+        volatile boolean failed;
 
         SubscriptionCheckObservable(AtomicInteger subscriptionCount, int maxConcurrent) {
             this.subscriptionCount = subscriptionCount;
@@ -120,7 +113,7 @@ public class FlowableMergeMaxConcurrentTest {
         }
 
     }
-    
+
     @Test
     public void testMergeALotOfSourcesOneByOneSynchronously() {
         int n = 10000;
@@ -128,7 +121,7 @@ public class FlowableMergeMaxConcurrentTest {
         for (int i = 0; i < n; i++) {
             sourceList.add(Flowable.just(i));
         }
-        Iterator<Integer> it = Flowable.merge(Flowable.fromIterable(sourceList), 1).toBlocking().iterator();
+        Iterator<Integer> it = Flowable.merge(Flowable.fromIterable(sourceList), 1).blockingIterable().iterator();
         int j = 0;
         while (it.hasNext()) {
             assertEquals((Integer)j, it.next());
@@ -136,6 +129,7 @@ public class FlowableMergeMaxConcurrentTest {
         }
         assertEquals(j, n);
     }
+
     @Test
     public void testMergeALotOfSourcesOneByOneSynchronouslyTakeHalf() {
         int n = 10000;
@@ -143,7 +137,7 @@ public class FlowableMergeMaxConcurrentTest {
         for (int i = 0; i < n; i++) {
             sourceList.add(Flowable.just(i));
         }
-        Iterator<Integer> it = Flowable.merge(Flowable.fromIterable(sourceList), 1).take(n / 2).toBlocking().iterator();
+        Iterator<Integer> it = Flowable.merge(Flowable.fromIterable(sourceList), 1).take(n / 2).blockingIterable().iterator();
         int j = 0;
         while (it.hasNext()) {
             assertEquals((Integer)j, it.next());
@@ -151,7 +145,7 @@ public class FlowableMergeMaxConcurrentTest {
         }
         assertEquals(j, n / 2);
     }
-    
+
     @Test
     public void testSimple() {
         for (int i = 1; i < 100; i++) {
@@ -162,14 +156,15 @@ public class FlowableMergeMaxConcurrentTest {
                 sourceList.add(Flowable.just(j));
                 result.add(j);
             }
-            
+
             Flowable.merge(sourceList, i).subscribe(ts);
-        
+
             ts.assertNoErrors();
             ts.assertTerminated();
             ts.assertValueSequence(result);
         }
     }
+
     @Test
     public void testSimpleOneLess() {
         for (int i = 2; i < 100; i++) {
@@ -180,14 +175,15 @@ public class FlowableMergeMaxConcurrentTest {
                 sourceList.add(Flowable.just(j));
                 result.add(j);
             }
-            
+
             Flowable.merge(sourceList, i - 1).subscribe(ts);
-        
+
             ts.assertNoErrors();
             ts.assertTerminated();
             ts.assertValueSequence(result);
         }
     }
+
     @Test//(timeout = 20000)
     public void testSimpleAsyncLoop() {
         IoScheduler ios = (IoScheduler)Schedulers.io();
@@ -200,6 +196,7 @@ public class FlowableMergeMaxConcurrentTest {
             }
         }
     }
+
     @Test(timeout = 10000)
     public void testSimpleAsync() {
         for (int i = 1; i < 50; i++) {
@@ -210,22 +207,24 @@ public class FlowableMergeMaxConcurrentTest {
                 sourceList.add(Flowable.just(j).subscribeOn(Schedulers.io()));
                 expected.add(j);
             }
-            
+
             Flowable.merge(sourceList, i).subscribe(ts);
-        
+
             ts.awaitTerminalEvent(1, TimeUnit.SECONDS);
             ts.assertNoErrors();
             Set<Integer> actual = new HashSet<Integer>(ts.values());
-            
+
             assertEquals(expected, actual);
         }
     }
+
     @Test(timeout = 10000)
     public void testSimpleOneLessAsyncLoop() {
         for (int i = 0; i < 200; i++) {
             testSimpleOneLessAsync();
         }
     }
+
     @Test(timeout = 10000)
     public void testSimpleOneLessAsync() {
         long t = System.currentTimeMillis();
@@ -240,26 +239,27 @@ public class FlowableMergeMaxConcurrentTest {
                 sourceList.add(Flowable.just(j).subscribeOn(Schedulers.io()));
                 expected.add(j);
             }
-            
+
             Flowable.merge(sourceList, i - 1).subscribe(ts);
-        
+
             ts.awaitTerminalEvent(1, TimeUnit.SECONDS);
             ts.assertNoErrors();
             Set<Integer> actual = new HashSet<Integer>(ts.values());
-            
+
             assertEquals(expected, actual);
         }
     }
+
     @Test(timeout = 5000)
     public void testBackpressureHonored() throws Exception {
         List<Flowable<Integer>> sourceList = new ArrayList<Flowable<Integer>>(3);
-        
+
         sourceList.add(Flowable.range(0, 100000).subscribeOn(Schedulers.io()));
         sourceList.add(Flowable.range(0, 100000).subscribeOn(Schedulers.io()));
         sourceList.add(Flowable.range(0, 100000).subscribeOn(Schedulers.io()));
-        
+
         final CountDownLatch cdl = new CountDownLatch(5);
-        
+
         TestSubscriber<Integer> ts = new TestSubscriber<Integer>(0L) {
             @Override
             public void onNext(Integer t) {
@@ -267,31 +267,32 @@ public class FlowableMergeMaxConcurrentTest {
                 cdl.countDown();
             }
         };
-        
+
         Flowable.merge(sourceList, 2).subscribe(ts);
-        
+
         ts.request(5);
-        
+
         cdl.await();
-        
+
         ts.assertNoErrors();
         ts.assertValueCount(5);
         ts.assertNotComplete();
-        
+
         ts.dispose();
     }
+
     @Test(timeout = 5000)
     public void testTake() throws Exception {
         List<Flowable<Integer>> sourceList = new ArrayList<Flowable<Integer>>(3);
-        
+
         sourceList.add(Flowable.range(0, 100000).subscribeOn(Schedulers.io()));
         sourceList.add(Flowable.range(0, 100000).subscribeOn(Schedulers.io()));
         sourceList.add(Flowable.range(0, 100000).subscribeOn(Schedulers.io()));
-        
+
         TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
-        
+
         Flowable.merge(sourceList, 2).take(5).subscribe(ts);
-        
+
         ts.awaitTerminalEvent();
         ts.assertNoErrors();
         ts.assertValueCount(5);

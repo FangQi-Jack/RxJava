@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -18,14 +18,17 @@ import static org.junit.Assert.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
+import io.reactivex.annotations.NonNull;
 import org.junit.*;
 import org.reactivestreams.*;
 
 import io.reactivex.*;
-import io.reactivex.Flowable.Operator;
+import io.reactivex.Scheduler.Worker;
 import io.reactivex.disposables.Disposable;
-import io.reactivex.internal.subscriptions.*;
-import io.reactivex.schedulers.Schedulers;
+import io.reactivex.internal.functions.Functions;
+import io.reactivex.internal.operators.flowable.FlowableSubscribeOn.SubscribeOnSubscriber;
+import io.reactivex.internal.subscriptions.BooleanSubscription;
+import io.reactivex.schedulers.*;
 import io.reactivex.subscribers.*;
 
 public class FlowableSubscribeOnTest {
@@ -37,10 +40,10 @@ public class FlowableSubscribeOnTest {
         final CountDownLatch latch = new CountDownLatch(1);
         final CountDownLatch doneLatch = new CountDownLatch(1);
 
-        TestSubscriber<Integer> observer = new TestSubscriber<Integer>();
+        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
 
         Flowable
-        .create(new Publisher<Integer>() {
+        .unsafeCreate(new Publisher<Integer>() {
             @Override
             public void subscribe(
                     final Subscriber<? super Integer> subscriber) {
@@ -51,7 +54,7 @@ public class FlowableSubscribeOnTest {
                         latch.await();
                     } catch (InterruptedException e) {
                         // this means we were unsubscribed (Scheduler shut down and interrupts)
-                        // ... but we'll pretend we are like many Observables that ignore interrupts
+                        // ... but we'll pretend we are like many Flowables that ignore interrupts
                     }
 
                     subscriber.onComplete();
@@ -61,23 +64,23 @@ public class FlowableSubscribeOnTest {
                     doneLatch.countDown();
                 }
             }
-        }).subscribeOn(Schedulers.computation()).subscribe(observer);
+        }).subscribeOn(Schedulers.computation()).subscribe(ts);
 
         // wait for scheduling
         scheduled.await();
         // trigger unsubscribe
-        observer.dispose();
+        ts.dispose();
         latch.countDown();
         doneLatch.await();
-        observer.assertNoErrors();
-        observer.assertComplete();
+        ts.assertNoErrors();
+        ts.assertComplete();
     }
 
     @Test
     @Ignore("Publisher.subscribe can't throw")
     public void testThrownErrorHandling() {
         TestSubscriber<String> ts = new TestSubscriber<String>();
-        Flowable.create(new Publisher<String>() {
+        Flowable.unsafeCreate(new Publisher<String>() {
 
             @Override
             public void subscribe(Subscriber<? super String> s) {
@@ -92,7 +95,7 @@ public class FlowableSubscribeOnTest {
     @Test
     public void testOnError() {
         TestSubscriber<String> ts = new TestSubscriber<String>();
-        Flowable.create(new Publisher<String>() {
+        Flowable.unsafeCreate(new Publisher<String>() {
 
             @Override
             public void subscribe(Subscriber<? super String> s) {
@@ -120,6 +123,7 @@ public class FlowableSubscribeOnTest {
             this.unit = unit;
         }
 
+        @NonNull
         @Override
         public Worker createWorker() {
             return new SlowInner(actual.createWorker());
@@ -143,13 +147,15 @@ public class FlowableSubscribeOnTest {
                 return actualInner.isDisposed();
             }
 
+            @NonNull
             @Override
-            public Disposable schedule(final Runnable action) {
+            public Disposable schedule(@NonNull final Runnable action) {
                 return actualInner.schedule(action, delay, unit);
             }
 
+            @NonNull
             @Override
-            public Disposable schedule(final Runnable action, final long delayTime, final TimeUnit delayUnit) {
+            public Disposable schedule(@NonNull final Runnable action, final long delayTime, @NonNull final TimeUnit delayUnit) {
                 TimeUnit common = delayUnit.compareTo(unit) < 0 ? delayUnit : unit;
                 long t = common.convert(delayTime, delayUnit) + common.convert(delay, unit);
                 return actualInner.schedule(action, t, common);
@@ -163,7 +169,7 @@ public class FlowableSubscribeOnTest {
     public void testUnsubscribeInfiniteStream() throws InterruptedException {
         TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
         final AtomicInteger count = new AtomicInteger();
-        Flowable.create(new Publisher<Integer>() {
+        Flowable.unsafeCreate(new Publisher<Integer>() {
 
             @Override
             public void subscribe(Subscriber<? super Integer> sub) {
@@ -187,7 +193,7 @@ public class FlowableSubscribeOnTest {
     @Test
     public void testBackpressureReschedulesCorrectly() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch(10);
-        TestSubscriber<Integer> ts = new TestSubscriber<Integer>(new DefaultObserver<Integer>() {
+        TestSubscriber<Integer> ts = new TestSubscriber<Integer>(new DefaultSubscriber<Integer>() {
 
             @Override
             public void onComplete() {
@@ -218,7 +224,7 @@ public class FlowableSubscribeOnTest {
     @Test
     public void testSetProducerSynchronousRequest() {
         TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
-        Flowable.just(1, 2, 3).lift(new Operator<Integer, Integer>() {
+        Flowable.just(1, 2, 3).lift(new FlowableOperator<Integer, Integer>() {
 
             @Override
             public Subscriber<? super Integer> apply(final Subscriber<? super Integer> child) {
@@ -231,14 +237,14 @@ public class FlowableSubscribeOnTest {
                             child.onError(new RuntimeException("Expected to receive request before onNext but didn't"));
                         }
                     }
-                    
+
                     @Override
                     public void cancel() {
-                        
+
                     }
 
                 });
-                Subscriber<Integer> parent = new DefaultObserver<Integer>() {
+                Subscriber<Integer> parent = new DefaultSubscriber<Integer>() {
 
                     @Override
                     public void onComplete() {
@@ -266,4 +272,151 @@ public class FlowableSubscribeOnTest {
         ts.assertNoErrors();
     }
 
+    @Test
+    public void cancelBeforeActualSubscribe() {
+        TestScheduler test = new TestScheduler();
+
+        TestSubscriber<Integer> ts = Flowable.just(1).hide()
+                .subscribeOn(test).test(Long.MAX_VALUE, true);
+
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+
+        ts
+        .assertSubscribed()
+        .assertNoValues()
+        .assertNotTerminated();
+    }
+
+    @Test
+    public void dispose() {
+        TestHelper.checkDisposed(Flowable.just(1).subscribeOn(Schedulers.single()));
+    }
+
+    @Test
+    public void deferredRequestRace() {
+        for (int i = 0; i < TestHelper.RACE_DEFAULT_LOOPS; i++) {
+
+            final TestSubscriber<Integer> ts = new TestSubscriber<Integer>(0L);
+
+            Worker w = Schedulers.computation().createWorker();
+
+            final SubscribeOnSubscriber<Integer> so = new SubscribeOnSubscriber<Integer>(ts, w, Flowable.<Integer>never(), true);
+            ts.onSubscribe(so);
+
+            final BooleanSubscription bs = new BooleanSubscription();
+
+            try {
+                Runnable r1 = new Runnable() {
+                    @Override
+                    public void run() {
+                        so.onSubscribe(bs);
+                    }
+                };
+
+                Runnable r2 = new Runnable() {
+                    @Override
+                    public void run() {
+                        so.request(1);
+                    }
+                };
+
+                TestHelper.race(r1, r2);
+            } finally {
+                w.dispose();
+            }
+        }
+    }
+
+    @Test
+    public void nonScheduledRequests() {
+        TestSubscriber<Object> ts = Flowable.create(new FlowableOnSubscribe<Object>() {
+            @Override
+            public void subscribe(FlowableEmitter<Object> s) throws Exception {
+                for (int i = 1; i < 1001; i++) {
+                    s.onNext(i);
+                    Thread.sleep(1);
+                }
+                s.onComplete();
+            }
+        }, BackpressureStrategy.DROP)
+        .subscribeOn(Schedulers.single())
+        .observeOn(Schedulers.computation())
+        .test()
+        .awaitDone(5, TimeUnit.SECONDS)
+        .assertNoErrors()
+        .assertComplete();
+
+        int c = ts.valueCount();
+
+        assertTrue("" + c, c > Flowable.bufferSize());
+    }
+
+    @Test
+    public void scheduledRequests() {
+        Flowable.create(new FlowableOnSubscribe<Object>() {
+            @Override
+            public void subscribe(FlowableEmitter<Object> s) throws Exception {
+                for (int i = 1; i < 1001; i++) {
+                    s.onNext(i);
+                    Thread.sleep(1);
+                }
+                s.onComplete();
+            }
+        }, BackpressureStrategy.DROP)
+        .map(Functions.identity())
+        .subscribeOn(Schedulers.single())
+        .observeOn(Schedulers.computation())
+        .test()
+        .awaitDone(5, TimeUnit.SECONDS)
+        .assertValueCount(Flowable.bufferSize())
+        .assertNoErrors()
+        .assertComplete();
+    }
+
+    @Test
+    public void nonScheduledRequestsNotSubsequentSubscribeOn() {
+        TestSubscriber<Object> ts = Flowable.create(new FlowableOnSubscribe<Object>() {
+            @Override
+            public void subscribe(FlowableEmitter<Object> s) throws Exception {
+                for (int i = 1; i < 1001; i++) {
+                    s.onNext(i);
+                    Thread.sleep(1);
+                }
+                s.onComplete();
+            }
+        }, BackpressureStrategy.DROP)
+        .map(Functions.identity())
+        .subscribeOn(Schedulers.single(), false)
+        .observeOn(Schedulers.computation())
+        .test()
+        .awaitDone(5, TimeUnit.SECONDS)
+        .assertNoErrors()
+        .assertComplete();
+
+        int c = ts.valueCount();
+
+        assertTrue("" + c, c > Flowable.bufferSize());
+    }
+
+    @Test
+    public void scheduledRequestsNotSubsequentSubscribeOn() {
+        Flowable.create(new FlowableOnSubscribe<Object>() {
+            @Override
+            public void subscribe(FlowableEmitter<Object> s) throws Exception {
+                for (int i = 1; i < 1001; i++) {
+                    s.onNext(i);
+                    Thread.sleep(1);
+                }
+                s.onComplete();
+            }
+        }, BackpressureStrategy.DROP)
+        .map(Functions.identity())
+        .subscribeOn(Schedulers.single(), true)
+        .observeOn(Schedulers.computation())
+        .test()
+        .awaitDone(5, TimeUnit.SECONDS)
+        .assertValueCount(Flowable.bufferSize())
+        .assertNoErrors()
+        .assertComplete();
+    }
 }

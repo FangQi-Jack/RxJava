@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,101 +13,95 @@
 
 package io.reactivex.internal.operators.observable;
 
+import io.reactivex.internal.functions.ObjectHelper;
 import java.util.concurrent.atomic.*;
 
 import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
+import io.reactivex.exceptions.Exceptions;
 import io.reactivex.functions.Function;
-import io.reactivex.internal.disposables.DisposableHelper;
-import io.reactivex.internal.subscribers.observable.DisposableObserver;
-import io.reactivex.observers.SerializedObserver;
+import io.reactivex.internal.disposables.*;
+import io.reactivex.observers.*;
 import io.reactivex.plugins.RxJavaPlugins;
 
-public final class ObservableDebounce<T, U> extends ObservableSource<T, T> {
-    final Function<? super T, ? extends ObservableConsumable<U>> debounceSelector;
+public final class ObservableDebounce<T, U> extends AbstractObservableWithUpstream<T, T> {
+    final Function<? super T, ? extends ObservableSource<U>> debounceSelector;
 
-    public ObservableDebounce(ObservableConsumable<T> source, Function<? super T, ? extends ObservableConsumable<U>> debounceSelector) {
+    public ObservableDebounce(ObservableSource<T> source, Function<? super T, ? extends ObservableSource<U>> debounceSelector) {
         super(source);
         this.debounceSelector = debounceSelector;
     }
-    
+
     @Override
     public void subscribeActual(Observer<? super T> t) {
-        source.subscribe(new DebounceSubscriber<T, U>(new SerializedObserver<T>(t), debounceSelector));
+        source.subscribe(new DebounceObserver<T, U>(new SerializedObserver<T>(t), debounceSelector));
     }
-    
-    static final class DebounceSubscriber<T, U> 
-    implements Observer<T>, Disposable {
-        final Observer<? super T> actual;
-        final Function<? super T, ? extends ObservableConsumable<U>> debounceSelector;
-        
-        volatile boolean gate;
 
-        Disposable s;
-        
+    static final class DebounceObserver<T, U>
+    implements Observer<T>, Disposable {
+        final Observer<? super T> downstream;
+        final Function<? super T, ? extends ObservableSource<U>> debounceSelector;
+
+        Disposable upstream;
+
         final AtomicReference<Disposable> debouncer = new AtomicReference<Disposable>();
 
         volatile long index;
-        
+
         boolean done;
 
-        public DebounceSubscriber(Observer<? super T> actual,
-                Function<? super T, ? extends ObservableConsumable<U>> debounceSelector) {
-            this.actual = actual;
+        DebounceObserver(Observer<? super T> actual,
+                Function<? super T, ? extends ObservableSource<U>> debounceSelector) {
+            this.downstream = actual;
             this.debounceSelector = debounceSelector;
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+                downstream.onSubscribe(this);
             }
         }
-        
+
         @Override
         public void onNext(T t) {
             if (done) {
                 return;
             }
-            
+
             long idx = index + 1;
             index = idx;
-            
+
             Disposable d = debouncer.get();
             if (d != null) {
                 d.dispose();
             }
-            
-            ObservableConsumable<U> p;
-            
+
+            ObservableSource<U> p;
+
             try {
-                p = debounceSelector.apply(t);
+                p = ObjectHelper.requireNonNull(debounceSelector.apply(t), "The ObservableSource supplied is null");
             } catch (Throwable e) {
+                Exceptions.throwIfFatal(e);
                 dispose();
-                actual.onError(e);
+                downstream.onError(e);
                 return;
             }
-            
-            if (p == null) {
-                dispose();
-                actual.onError(new NullPointerException("The publisher supplied is null"));
-                return;
-            }
-            
-            DebounceInnerSubscriber<T, U> dis = new DebounceInnerSubscriber<T, U>(this, idx, t);
-            
+
+            DebounceInnerObserver<T, U> dis = new DebounceInnerObserver<T, U>(this, idx, t);
+
             if (debouncer.compareAndSet(d, dis)) {
                 p.subscribe(dis);
             }
         }
-        
+
         @Override
         public void onError(Throwable t) {
             DisposableHelper.dispose(debouncer);
-            actual.onError(t);
+            downstream.onError(t);
         }
-        
+
         @Override
         public void onComplete() {
             if (done) {
@@ -117,45 +111,45 @@ public final class ObservableDebounce<T, U> extends ObservableSource<T, T> {
             Disposable d = debouncer.get();
             if (d != DisposableHelper.DISPOSED) {
                 @SuppressWarnings("unchecked")
-                DebounceInnerSubscriber<T, U> dis = (DebounceInnerSubscriber<T, U>)d;
+                DebounceInnerObserver<T, U> dis = (DebounceInnerObserver<T, U>)d;
                 dis.emit();
                 DisposableHelper.dispose(debouncer);
-                actual.onComplete();
+                downstream.onComplete();
             }
         }
-        
+
         @Override
         public void dispose() {
-            s.dispose();
+            upstream.dispose();
             DisposableHelper.dispose(debouncer);
         }
 
         @Override
         public boolean isDisposed() {
-            return s.isDisposed();
+            return upstream.isDisposed();
         }
 
         void emit(long idx, T value) {
             if (idx == index) {
-                actual.onNext(value);
+                downstream.onNext(value);
             }
         }
-        
-        static final class DebounceInnerSubscriber<T, U> extends DisposableObserver<U> {
-            final DebounceSubscriber<T, U> parent;
+
+        static final class DebounceInnerObserver<T, U> extends DisposableObserver<U> {
+            final DebounceObserver<T, U> parent;
             final long index;
             final T value;
-            
+
             boolean done;
-            
+
             final AtomicBoolean once = new AtomicBoolean();
-            
-            public DebounceInnerSubscriber(DebounceSubscriber<T, U> parent, long index, T value) {
+
+            DebounceInnerObserver(DebounceObserver<T, U> parent, long index, T value) {
                 this.parent = parent;
                 this.index = index;
                 this.value = value;
             }
-            
+
             @Override
             public void onNext(U t) {
                 if (done) {
@@ -165,13 +159,13 @@ public final class ObservableDebounce<T, U> extends ObservableSource<T, T> {
                 dispose();
                 emit();
             }
-            
+
             void emit() {
                 if (once.compareAndSet(false, true)) {
                     parent.emit(index, value);
                 }
             }
-            
+
             @Override
             public void onError(Throwable t) {
                 if (done) {
@@ -181,7 +175,7 @@ public final class ObservableDebounce<T, U> extends ObservableSource<T, T> {
                 done = true;
                 parent.onError(t);
             }
-            
+
             @Override
             public void onComplete() {
                 if (done) {

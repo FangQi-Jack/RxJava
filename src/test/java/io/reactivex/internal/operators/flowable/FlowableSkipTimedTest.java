@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,7 +13,6 @@
 
 package io.reactivex.internal.operators.flowable;
 
-import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.*;
 
 import java.util.concurrent.TimeUnit;
@@ -37,9 +36,9 @@ public class FlowableSkipTimedTest {
 
         Flowable<Integer> result = source.skip(1, TimeUnit.SECONDS, scheduler);
 
-        Subscriber<Object> o = TestHelper.mockSubscriber();
+        Subscriber<Object> subscriber = TestHelper.mockSubscriber();
 
-        result.subscribe(o);
+        result.subscribe(subscriber);
 
         source.onNext(1);
         source.onNext(2);
@@ -53,17 +52,17 @@ public class FlowableSkipTimedTest {
 
         source.onComplete();
 
-        InOrder inOrder = inOrder(o);
+        InOrder inOrder = inOrder(subscriber);
 
-        inOrder.verify(o, never()).onNext(1);
-        inOrder.verify(o, never()).onNext(2);
-        inOrder.verify(o, never()).onNext(3);
-        inOrder.verify(o).onNext(4);
-        inOrder.verify(o).onNext(5);
-        inOrder.verify(o).onNext(6);
-        inOrder.verify(o).onComplete();
+        inOrder.verify(subscriber, never()).onNext(1);
+        inOrder.verify(subscriber, never()).onNext(2);
+        inOrder.verify(subscriber, never()).onNext(3);
+        inOrder.verify(subscriber).onNext(4);
+        inOrder.verify(subscriber).onNext(5);
+        inOrder.verify(subscriber).onNext(6);
+        inOrder.verify(subscriber).onComplete();
         inOrder.verifyNoMoreInteractions();
-        verify(o, never()).onError(any(Throwable.class));
+        verify(subscriber, never()).onError(any(Throwable.class));
     }
 
     @Test
@@ -74,9 +73,9 @@ public class FlowableSkipTimedTest {
 
         Flowable<Integer> result = source.skip(1, TimeUnit.SECONDS, scheduler);
 
-        Subscriber<Object> o = TestHelper.mockSubscriber();
+        Subscriber<Object> subscriber = TestHelper.mockSubscriber();
 
-        result.subscribe(o);
+        result.subscribe(subscriber);
 
         source.onNext(1);
         source.onNext(2);
@@ -85,12 +84,12 @@ public class FlowableSkipTimedTest {
 
         scheduler.advanceTimeBy(1, TimeUnit.SECONDS);
 
-        InOrder inOrder = inOrder(o);
+        InOrder inOrder = inOrder(subscriber);
 
-        inOrder.verify(o).onComplete();
+        inOrder.verify(subscriber).onComplete();
         inOrder.verifyNoMoreInteractions();
-        verify(o, never()).onNext(any());
-        verify(o, never()).onError(any(Throwable.class));
+        verify(subscriber, never()).onNext(any());
+        verify(subscriber, never()).onError(any(Throwable.class));
     }
 
     @Test
@@ -101,9 +100,9 @@ public class FlowableSkipTimedTest {
 
         Flowable<Integer> result = source.skip(1, TimeUnit.SECONDS, scheduler);
 
-        Subscriber<Object> o = TestHelper.mockSubscriber();
+        Subscriber<Object> subscriber = TestHelper.mockSubscriber();
 
-        result.subscribe(o);
+        result.subscribe(subscriber);
 
         source.onNext(1);
         source.onNext(2);
@@ -112,12 +111,12 @@ public class FlowableSkipTimedTest {
 
         scheduler.advanceTimeBy(1, TimeUnit.SECONDS);
 
-        InOrder inOrder = inOrder(o);
+        InOrder inOrder = inOrder(subscriber);
 
-        inOrder.verify(o).onError(any(TestException.class));
+        inOrder.verify(subscriber).onError(any(TestException.class));
         inOrder.verifyNoMoreInteractions();
-        verify(o, never()).onNext(any());
-        verify(o, never()).onComplete();
+        verify(subscriber, never()).onNext(any());
+        verify(subscriber, never()).onComplete();
     }
 
     @Test
@@ -128,9 +127,9 @@ public class FlowableSkipTimedTest {
 
         Flowable<Integer> result = source.skip(1, TimeUnit.SECONDS, scheduler);
 
-        Subscriber<Object> o = TestHelper.mockSubscriber();
+        Subscriber<Object> subscriber = TestHelper.mockSubscriber();
 
-        result.subscribe(o);
+        result.subscribe(subscriber);
 
         source.onNext(1);
         source.onNext(2);
@@ -144,17 +143,25 @@ public class FlowableSkipTimedTest {
 
         source.onError(new TestException());
 
-        InOrder inOrder = inOrder(o);
+        InOrder inOrder = inOrder(subscriber);
 
-        inOrder.verify(o, never()).onNext(1);
-        inOrder.verify(o, never()).onNext(2);
-        inOrder.verify(o, never()).onNext(3);
-        inOrder.verify(o).onNext(4);
-        inOrder.verify(o).onNext(5);
-        inOrder.verify(o).onNext(6);
-        inOrder.verify(o).onError(any(TestException.class));
+        inOrder.verify(subscriber, never()).onNext(1);
+        inOrder.verify(subscriber, never()).onNext(2);
+        inOrder.verify(subscriber, never()).onNext(3);
+        inOrder.verify(subscriber).onNext(4);
+        inOrder.verify(subscriber).onNext(5);
+        inOrder.verify(subscriber).onNext(6);
+        inOrder.verify(subscriber).onError(any(TestException.class));
         inOrder.verifyNoMoreInteractions();
-        verify(o, never()).onComplete();
+        verify(subscriber, never()).onComplete();
 
+    }
+
+    @Test
+    public void skipTimedDefaultScheduler() {
+        Flowable.just(1).skip(1, TimeUnit.MINUTES)
+        .test()
+        .awaitDone(5, TimeUnit.SECONDS)
+        .assertResult();
     }
 }

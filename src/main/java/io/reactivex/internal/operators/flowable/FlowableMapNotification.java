@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,210 +13,100 @@
 
 package io.reactivex.internal.operators.flowable;
 
-import java.util.concurrent.atomic.*;
+import java.util.concurrent.Callable;
 
-import org.reactivestreams.*;
+import org.reactivestreams.Subscriber;
 
 import io.reactivex.Flowable;
-import io.reactivex.functions.*;
-import io.reactivex.internal.subscriptions.SubscriptionHelper;
-import io.reactivex.internal.util.BackpressureHelper;
+import io.reactivex.exceptions.*;
+import io.reactivex.functions.Function;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.subscribers.SinglePostCompleteSubscriber;
 
-public final class FlowableMapNotification<T, R> extends Flowable<Publisher<? extends R>>{
+public final class FlowableMapNotification<T, R> extends AbstractFlowableWithUpstream<T, R> {
 
-    final Publisher<T> source;
-    
-    final Function<? super T, ? extends Publisher<? extends R>> onNextMapper;
-    final Function<? super Throwable, ? extends Publisher<? extends R>> onErrorMapper;
-    final Supplier<? extends Publisher<? extends R>> onCompleteSupplier;
+    final Function<? super T, ? extends R> onNextMapper;
+    final Function<? super Throwable, ? extends R> onErrorMapper;
+    final Callable<? extends R> onCompleteSupplier;
 
     public FlowableMapNotification(
-            Publisher<T> source,
-            Function<? super T, ? extends Publisher<? extends R>> onNextMapper, 
-            Function<? super Throwable, ? extends Publisher<? extends R>> onErrorMapper, 
-            Supplier<? extends Publisher<? extends R>> onCompleteSupplier) {
-        this.source = source;
+            Flowable<T> source,
+            Function<? super T, ? extends R> onNextMapper,
+            Function<? super Throwable, ? extends R> onErrorMapper,
+            Callable<? extends R> onCompleteSupplier) {
+        super(source);
         this.onNextMapper = onNextMapper;
         this.onErrorMapper = onErrorMapper;
         this.onCompleteSupplier = onCompleteSupplier;
     }
-    
+
     @Override
-    protected void subscribeActual(Subscriber<? super Publisher<? extends R>> s) {
+    protected void subscribeActual(Subscriber<? super R> s) {
         source.subscribe(new MapNotificationSubscriber<T, R>(s, onNextMapper, onErrorMapper, onCompleteSupplier));
     }
-    
-    // FIXME needs post-complete drain management
+
     static final class MapNotificationSubscriber<T, R>
-    extends AtomicLong
-    implements Subscriber<T>, Subscription {
-        /** */
+    extends SinglePostCompleteSubscriber<T, R> {
+
         private static final long serialVersionUID = 2757120512858778108L;
-        
-        final Subscriber<? super Publisher<? extends R>> actual;
-        final Function<? super T, ? extends Publisher<? extends R>> onNextMapper;
-        final Function<? super Throwable, ? extends Publisher<? extends R>> onErrorMapper;
-        final Supplier<? extends Publisher<? extends R>> onCompleteSupplier;
-        
-        Subscription s;
-        
-        Publisher<? extends R> value;
-        
-        volatile boolean done;
+        final Function<? super T, ? extends R> onNextMapper;
+        final Function<? super Throwable, ? extends R> onErrorMapper;
+        final Callable<? extends R> onCompleteSupplier;
 
-        final AtomicInteger state = new AtomicInteger();
-        
-        static final int NO_REQUEST_NO_VALUE = 0;
-        static final int NO_REQUEST_HAS_VALUE = 1;
-        static final int HAS_REQUEST_NO_VALUE = 2;
-        static final int HAS_REQUEST_HAS_VALUE = 3;
-
-        public MapNotificationSubscriber(Subscriber<? super Publisher<? extends R>> actual,
-                Function<? super T, ? extends Publisher<? extends R>> onNextMapper,
-                Function<? super Throwable, ? extends Publisher<? extends R>> onErrorMapper,
-                Supplier<? extends Publisher<? extends R>> onCompleteSupplier) {
-            this.actual = actual;
+        MapNotificationSubscriber(Subscriber<? super R> actual,
+                Function<? super T, ? extends R> onNextMapper,
+                Function<? super Throwable, ? extends R> onErrorMapper,
+                Callable<? extends R> onCompleteSupplier) {
+            super(actual);
             this.onNextMapper = onNextMapper;
             this.onErrorMapper = onErrorMapper;
             this.onCompleteSupplier = onCompleteSupplier;
         }
-        
-        @Override
-        public void onSubscribe(Subscription s) {
-            if (SubscriptionHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
-            }
-        }
-        
+
         @Override
         public void onNext(T t) {
-            Publisher<? extends R> p;
-            
+            R p;
+
             try {
-                p = onNextMapper.apply(t);
+                p = ObjectHelper.requireNonNull(onNextMapper.apply(t), "The onNext publisher returned is null");
             } catch (Throwable e) {
-                actual.onError(e);
+                Exceptions.throwIfFatal(e);
+                downstream.onError(e);
                 return;
             }
-            
-            if (p == null) {
-                actual.onError(new NullPointerException("The onNext publisher returned is null"));
-                return;
-            }
-            
-            actual.onNext(p);
-            
-            long r = get();
-            if (r != Long.MAX_VALUE) {
-                decrementAndGet();
-            }
+
+            produced++;
+            downstream.onNext(p);
         }
-        
+
         @Override
         public void onError(Throwable t) {
-            Publisher<? extends R> p;
-            
+            R p;
+
             try {
-                p = onErrorMapper.apply(t);
+                p = ObjectHelper.requireNonNull(onErrorMapper.apply(t), "The onError publisher returned is null");
             } catch (Throwable e) {
-                actual.onError(e);
+                Exceptions.throwIfFatal(e);
+                downstream.onError(new CompositeException(t, e));
                 return;
             }
 
-            if (p == null) {
-                actual.onError(new NullPointerException("The onError publisher returned is null"));
-                return;
-            }
-
-            tryEmit(p);
+            complete(p);
         }
-        
+
         @Override
         public void onComplete() {
-            Publisher<? extends R> p;
-            
+            R p;
+
             try {
-                p = onCompleteSupplier.get();
+                p = ObjectHelper.requireNonNull(onCompleteSupplier.call(), "The onComplete publisher returned is null");
             } catch (Throwable e) {
-                actual.onError(e);
+                Exceptions.throwIfFatal(e);
+                downstream.onError(e);
                 return;
             }
 
-            if (p == null) {
-                actual.onError(new NullPointerException("The onComplete publisher returned is null"));
-                return;
-            }
-
-            tryEmit(p);
-        }
-        
-        
-        void tryEmit(Publisher<? extends R> p) {
-            long r = get();
-            if (r != 0L) {
-                actual.onNext(p);
-                actual.onComplete();
-            } else {
-                for (;;) {
-                    int s = state.get();
-                    if (s == HAS_REQUEST_NO_VALUE) {
-                        if (state.compareAndSet(HAS_REQUEST_NO_VALUE, HAS_REQUEST_HAS_VALUE)) {
-                            actual.onNext(p);
-                            actual.onComplete();
-                        }
-                        return;
-                    } else
-                    if (s == NO_REQUEST_NO_VALUE) {
-                        value = p;
-                        done = true;
-                        if (state.compareAndSet(NO_REQUEST_NO_VALUE, NO_REQUEST_HAS_VALUE)) {
-                            return;
-                        }
-                    } else
-                    if (s == NO_REQUEST_HAS_VALUE || s == HAS_REQUEST_HAS_VALUE) {
-                        return;
-                    }
-                }
-            }
-        }
-        
-        @Override
-        public void request(long n) {
-            if (!SubscriptionHelper.validate(n)) {
-                return;
-            }
-            
-            BackpressureHelper.add(this, n);
-            if (done) {
-                for (;;) {
-                    int s = state.get();
-                    
-                    if (s == HAS_REQUEST_NO_VALUE || s == HAS_REQUEST_HAS_VALUE) {
-                        return;
-                    } else
-                    if (s == NO_REQUEST_HAS_VALUE) {
-                        if (state.compareAndSet(NO_REQUEST_HAS_VALUE, HAS_REQUEST_HAS_VALUE)) {
-                            Publisher<? extends R> p = value;
-                            value = null;
-                            actual.onNext(p);
-                            actual.onComplete();
-                        }
-                        return;
-                    } else
-                    if (state.compareAndSet(NO_REQUEST_NO_VALUE, HAS_REQUEST_NO_VALUE)) {
-                        return;
-                    }
-                }
-            } else {
-                s.request(n);
-            }
-        }
-        
-        @Override
-        public void cancel() {
-            state.lazySet(HAS_REQUEST_HAS_VALUE);
-            s.cancel();
+            complete(p);
         }
     }
 }

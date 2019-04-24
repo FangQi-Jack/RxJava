@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -17,114 +17,105 @@ import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import io.reactivex.*;
-import io.reactivex.disposables.*;
-import io.reactivex.internal.disposables.EmptyDisposable;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.exceptions.Exceptions;
+import io.reactivex.internal.disposables.*;
+import io.reactivex.internal.functions.ObjectHelper;
 
 public final class CompletableConcatIterable extends Completable {
-    final Iterable<? extends CompletableConsumable> sources;
-    
-    public CompletableConcatIterable(Iterable<? extends CompletableConsumable> sources) {
+    final Iterable<? extends CompletableSource> sources;
+
+    public CompletableConcatIterable(Iterable<? extends CompletableSource> sources) {
         this.sources = sources;
     }
-    
+
     @Override
-    public void subscribeActual(CompletableSubscriber s) {
-        
-        Iterator<? extends CompletableConsumable> it;
-        
+    public void subscribeActual(CompletableObserver observer) {
+
+        Iterator<? extends CompletableSource> it;
+
         try {
-            it = sources.iterator();
+            it = ObjectHelper.requireNonNull(sources.iterator(), "The iterator returned is null");
         } catch (Throwable e) {
-            s.onSubscribe(EmptyDisposable.INSTANCE);
-            s.onError(e);
+            Exceptions.throwIfFatal(e);
+            EmptyDisposable.error(e, observer);
             return;
         }
-        
-        if (it == null) {
-            s.onSubscribe(EmptyDisposable.INSTANCE);
-            s.onError(new NullPointerException("The iterator returned is null"));
-            return;
-        }
-        
-        ConcatInnerSubscriber inner = new ConcatInnerSubscriber(s, it);
-        s.onSubscribe(inner.sd);
+
+        ConcatInnerObserver inner = new ConcatInnerObserver(observer, it);
+        observer.onSubscribe(inner.sd);
         inner.next();
     }
-    
-    static final class ConcatInnerSubscriber extends AtomicInteger implements CompletableSubscriber {
-        /** */
+
+    static final class ConcatInnerObserver extends AtomicInteger implements CompletableObserver {
+
         private static final long serialVersionUID = -7965400327305809232L;
 
-        final CompletableSubscriber actual;
-        final Iterator<? extends CompletableConsumable> sources;
-        
-        int index;
-        
-        final SerialDisposable sd;
-        
-        public ConcatInnerSubscriber(CompletableSubscriber actual, Iterator<? extends CompletableConsumable> sources) {
-            this.actual = actual;
+        final CompletableObserver downstream;
+        final Iterator<? extends CompletableSource> sources;
+
+        final SequentialDisposable sd;
+
+        ConcatInnerObserver(CompletableObserver actual, Iterator<? extends CompletableSource> sources) {
+            this.downstream = actual;
             this.sources = sources;
-            this.sd = new SerialDisposable();
+            this.sd = new SequentialDisposable();
         }
-        
+
         @Override
         public void onSubscribe(Disposable d) {
-            sd.set(d);
+            sd.replace(d);
         }
-        
+
         @Override
         public void onError(Throwable e) {
-            actual.onError(e);
+            downstream.onError(e);
         }
-        
+
         @Override
         public void onComplete() {
             next();
         }
-        
+
         void next() {
             if (sd.isDisposed()) {
                 return;
             }
-            
+
             if (getAndIncrement() != 0) {
                 return;
             }
 
-            Iterator<? extends CompletableConsumable> a = sources;
+            Iterator<? extends CompletableSource> a = sources;
             do {
                 if (sd.isDisposed()) {
                     return;
                 }
-                
+
                 boolean b;
                 try {
                     b = a.hasNext();
                 } catch (Throwable ex) {
-                    actual.onError(ex);
+                    Exceptions.throwIfFatal(ex);
+                    downstream.onError(ex);
                     return;
                 }
-                
+
                 if (!b) {
-                    actual.onComplete();
+                    downstream.onComplete();
                     return;
                 }
-                
-                CompletableConsumable c;
-                
+
+                CompletableSource c;
+
                 try {
-                    c = a.next();
+                    c = ObjectHelper.requireNonNull(a.next(), "The CompletableSource returned is null");
                 } catch (Throwable ex) {
-                    actual.onError(ex);
+                    Exceptions.throwIfFatal(ex);
+                    downstream.onError(ex);
                     return;
                 }
-                
-                if (c == null) {
-                    actual.onError(new NullPointerException("The completable returned is null"));
-                    return;
-                }
-                
+
                 c.subscribe(this);
             } while (decrementAndGet() != 0);
         }

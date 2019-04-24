@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -21,13 +21,13 @@ import io.reactivex.disposables.Disposable;
 import io.reactivex.internal.disposables.DisposableHelper;
 import io.reactivex.observers.SerializedObserver;
 
-public final class ObservableDelay<T> extends ObservableSource<T, T> {
+public final class ObservableDelay<T> extends AbstractObservableWithUpstream<T, T> {
     final long delay;
     final TimeUnit unit;
     final Scheduler scheduler;
     final boolean delayError;
-    
-    public ObservableDelay(ObservableConsumable<T> source, long delay, TimeUnit unit, Scheduler scheduler, boolean delayError) {
+
+    public ObservableDelay(ObservableSource<T> source, long delay, TimeUnit unit, Scheduler scheduler, boolean delayError) {
         super(source);
         this.delay = delay;
         this.unit = unit;
@@ -38,95 +38,109 @@ public final class ObservableDelay<T> extends ObservableSource<T, T> {
     @Override
     @SuppressWarnings("unchecked")
     public void subscribeActual(Observer<? super T> t) {
-        Observer<T> s;
+        Observer<T> observer;
         if (delayError) {
-            s = (Observer<T>)t;
+            observer = (Observer<T>)t;
         } else {
-            s = new SerializedObserver<T>(t);
+            observer = new SerializedObserver<T>(t);
         }
-        
+
         Scheduler.Worker w = scheduler.createWorker();
-        
-        source.subscribe(new DelaySubscriber<T>(s, delay, unit, w, delayError));
+
+        source.subscribe(new DelayObserver<T>(observer, delay, unit, w, delayError));
     }
-    
-    static final class DelaySubscriber<T> implements Observer<T>, Disposable {
-        final Observer<? super T> actual;
+
+    static final class DelayObserver<T> implements Observer<T>, Disposable {
+        final Observer<? super T> downstream;
         final long delay;
         final TimeUnit unit;
         final Scheduler.Worker w;
         final boolean delayError;
-        
-        Disposable s;
-        
-        public DelaySubscriber(Observer<? super T> actual, long delay, TimeUnit unit, Worker w, boolean delayError) {
+
+        Disposable upstream;
+
+        DelayObserver(Observer<? super T> actual, long delay, TimeUnit unit, Worker w, boolean delayError) {
             super();
-            this.actual = actual;
+            this.downstream = actual;
             this.delay = delay;
             this.unit = unit;
             this.w = w;
             this.delayError = delayError;
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+                downstream.onSubscribe(this);
             }
         }
-        
+
         @Override
         public void onNext(final T t) {
-            w.schedule(new Runnable() {
-                @Override
-                public void run() {
-                    actual.onNext(t);
-                }
-            }, delay, unit);
+            w.schedule(new OnNext(t), delay, unit);
         }
-        
+
         @Override
         public void onError(final Throwable t) {
-            if (delayError) {
-                w.schedule(new Runnable() {
-                    @Override
-                    public void run() {
-                        try {
-                            actual.onError(t);
-                        } finally {
-                            w.dispose();
-                        }
-                    }
-                }, delay, unit);
-            } else {
-                actual.onError(t);
-            }
+            w.schedule(new OnError(t), delayError ? delay : 0, unit);
         }
-        
+
         @Override
         public void onComplete() {
-            w.schedule(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        actual.onComplete();
-                    } finally {
-                        w.dispose();
-                    }
-                }
-            }, delay, unit);
+            w.schedule(new OnComplete(), delay, unit);
         }
-        
+
         @Override
         public void dispose() {
+            upstream.dispose();
             w.dispose();
-            s.dispose();
         }
 
         @Override
         public boolean isDisposed() {
             return w.isDisposed();
+        }
+
+        final class OnNext implements Runnable {
+            private final T t;
+
+            OnNext(T t) {
+                this.t = t;
+            }
+
+            @Override
+            public void run() {
+                downstream.onNext(t);
+            }
+        }
+
+        final class OnError implements Runnable {
+            private final Throwable throwable;
+
+            OnError(Throwable throwable) {
+                this.throwable = throwable;
+            }
+
+            @Override
+            public void run() {
+                try {
+                    downstream.onError(throwable);
+                } finally {
+                    w.dispose();
+                }
+            }
+        }
+
+        final class OnComplete implements Runnable {
+            @Override
+            public void run() {
+                try {
+                    downstream.onComplete();
+                } finally {
+                    w.dispose();
+                }
+            }
         }
     }
 }

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,16 +13,26 @@
 
 package io.reactivex.internal.operators.flowable;
 
-import static org.mockito.Matchers.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.*;
 import org.mockito.InOrder;
 import org.reactivestreams.Subscriber;
 
 import io.reactivex.*;
+import io.reactivex.exceptions.TestException;
 import io.reactivex.functions.*;
-import io.reactivex.internal.fuseable.QueueSubscription;
+import io.reactivex.internal.functions.Functions;
+import io.reactivex.internal.fuseable.*;
+import io.reactivex.internal.subscriptions.BooleanSubscription;
+import io.reactivex.plugins.RxJavaPlugins;
+import io.reactivex.processors.*;
+import io.reactivex.subscribers.*;
 
 public class FlowableDistinctUntilChangedTest {
 
@@ -130,7 +140,7 @@ public class FlowableDistinctUntilChangedTest {
         inOrder.verify(w, never()).onNext(anyString());
         inOrder.verify(w, never()).onComplete();
     }
-    
+
     @Test
     public void directComparer() {
         Flowable.fromArray(1, 2, 2, 3, 2, 4, 1, 1, 2)
@@ -143,7 +153,7 @@ public class FlowableDistinctUntilChangedTest {
         .test()
         .assertResult(1, 2, 3, 2, 4, 1, 2);
     }
-    
+
     @Test
     public void directComparerConditional() {
         Flowable.fromArray(1, 2, 2, 3, 2, 4, 1, 1, 2)
@@ -162,7 +172,7 @@ public class FlowableDistinctUntilChangedTest {
         .test()
         .assertResult(1, 2, 3, 2, 4, 1, 2);
     }
-    
+
     @Test
     public void directComparerFused() {
         Flowable.fromArray(1, 2, 2, 3, 2, 4, 1, 1, 2)
@@ -172,11 +182,12 @@ public class FlowableDistinctUntilChangedTest {
                 return a.equals(b);
             }
         })
-        .test(Long.MAX_VALUE, QueueSubscription.ANY, false)
-        .assertFusionMode(QueueSubscription.SYNC)
+        .to(SubscriberFusion.<Integer>test(Long.MAX_VALUE, QueueFuseable.ANY, false))
+        .assertOf(SubscriberFusion.<Integer>assertFuseable())
+        .assertOf(SubscriberFusion.<Integer>assertFusionMode(QueueFuseable.SYNC))
         .assertResult(1, 2, 3, 2, 4, 1, 2);
     }
-    
+
     @Test
     public void directComparerConditionalFused() {
         Flowable.fromArray(1, 2, 2, 3, 2, 4, 1, 1, 2)
@@ -192,8 +203,285 @@ public class FlowableDistinctUntilChangedTest {
                 return true;
             }
         })
-        .test(Long.MAX_VALUE, QueueSubscription.ANY, false)
-        .assertFusionMode(QueueSubscription.SYNC)
+        .to(SubscriberFusion.<Integer>test(Long.MAX_VALUE, QueueFuseable.ANY, false))
+        .assertOf(SubscriberFusion.<Integer>assertFuseable())
+        .assertOf(SubscriberFusion.<Integer>assertFusionMode(QueueFuseable.SYNC))
         .assertResult(1, 2, 3, 2, 4, 1, 2);
+    }
+
+    private static final Function<String, String> THROWS_NON_FATAL = new Function<String, String>() {
+        @Override
+        public String apply(String s) {
+            throw new RuntimeException();
+        }
+    };
+
+    @Test
+    public void testDistinctUntilChangedWhenNonFatalExceptionThrownByKeySelectorIsNotReportedByUpstream() {
+        Flowable<String> src = Flowable.just("a", "b", "null", "c");
+        final AtomicBoolean errorOccurred = new AtomicBoolean(false);
+        src
+          .doOnError(new Consumer<Throwable>() {
+                @Override
+                public void accept(Throwable t) {
+                    errorOccurred.set(true);
+                }
+            })
+          .distinctUntilChanged(THROWS_NON_FATAL)
+          .subscribe(w);
+        Assert.assertFalse(errorOccurred.get());
+    }
+
+    @Test
+    public void customComparator() {
+        Flowable<String> source = Flowable.just("a", "b", "B", "A", "a", "C");
+
+        TestSubscriber<String> ts = TestSubscriber.create();
+
+        source.distinctUntilChanged(new BiPredicate<String, String>() {
+            @Override
+            public boolean test(String a, String b) {
+                return a.compareToIgnoreCase(b) == 0;
+            }
+        })
+        .subscribe(ts);
+
+        ts.assertValues("a", "b", "A", "C");
+        ts.assertNoErrors();
+        ts.assertComplete();
+    }
+
+    @Test
+    public void customComparatorThrows() {
+        Flowable<String> source = Flowable.just("a", "b", "B", "A", "a", "C");
+
+        TestSubscriber<String> ts = TestSubscriber.create();
+
+        source.distinctUntilChanged(new BiPredicate<String, String>() {
+            @Override
+            public boolean test(String a, String b) {
+                throw new TestException();
+            }
+        })
+        .subscribe(ts);
+
+        ts.assertValue("a");
+        ts.assertNotComplete();
+        ts.assertError(TestException.class);
+    }
+
+    @Test
+    public void fused() {
+        TestSubscriber<Integer> ts = SubscriberFusion.newTest(QueueFuseable.ANY);
+
+        Flowable.just(1, 2, 2, 3, 3, 4, 5)
+        .distinctUntilChanged(new BiPredicate<Integer, Integer>() {
+            @Override
+            public boolean test(Integer a, Integer b) throws Exception {
+                return a.equals(b);
+            }
+        })
+        .subscribe(ts);
+
+        ts.assertOf(SubscriberFusion.<Integer>assertFuseable())
+        .assertOf(SubscriberFusion.<Integer>assertFusionMode(QueueFuseable.SYNC))
+        .assertResult(1, 2, 3, 4, 5)
+        ;
+    }
+
+    @Test
+    public void fusedAsync() {
+        TestSubscriber<Integer> ts = SubscriberFusion.newTest(QueueFuseable.ANY);
+
+        UnicastProcessor<Integer> up = UnicastProcessor.create();
+
+        up
+        .distinctUntilChanged(new BiPredicate<Integer, Integer>() {
+            @Override
+            public boolean test(Integer a, Integer b) throws Exception {
+                return a.equals(b);
+            }
+        })
+        .subscribe(ts);
+
+        TestHelper.emit(up, 1, 2, 2, 3, 3, 4, 5);
+
+        ts.assertOf(SubscriberFusion.<Integer>assertFuseable())
+        .assertOf(SubscriberFusion.<Integer>assertFusionMode(QueueFuseable.ASYNC))
+        .assertResult(1, 2, 3, 4, 5)
+        ;
+    }
+
+    @Test
+    public void ignoreCancel() {
+        List<Throwable> errors = TestHelper.trackPluginErrors();
+
+        try {
+            new Flowable<Integer>() {
+                @Override
+                public void subscribeActual(Subscriber<? super Integer> s) {
+                    s.onSubscribe(new BooleanSubscription());
+                    s.onNext(1);
+                    s.onNext(2);
+                    s.onNext(3);
+                    s.onError(new IOException());
+                    s.onComplete();
+                }
+            }
+            .distinctUntilChanged(new BiPredicate<Integer, Integer>() {
+                @Override
+                public boolean test(Integer a, Integer b) throws Exception {
+                    throw new TestException();
+                }
+            })
+            .test()
+            .assertFailure(TestException.class, 1);
+
+            TestHelper.assertUndeliverable(errors, 0, IOException.class);
+        } finally {
+            RxJavaPlugins.reset();
+        }
+    }
+
+    class Mutable {
+        int value;
+    }
+
+    @Test
+    public void mutableWithSelector() {
+        Mutable m = new Mutable();
+
+        PublishProcessor<Mutable> pp = PublishProcessor.create();
+
+        TestSubscriber<Mutable> ts = pp.distinctUntilChanged(new Function<Mutable, Object>() {
+            @Override
+            public Object apply(Mutable m) throws Exception {
+                return m.value;
+            }
+        })
+        .test();
+
+        pp.onNext(m);
+        m.value = 1;
+        pp.onNext(m);
+        pp.onComplete();
+
+        ts.assertResult(m, m);
+    }
+
+    @Test
+    public void conditionalNormal() {
+        Flowable.just(1, 2, 1, 3, 3, 4, 3, 5, 5)
+        .distinctUntilChanged()
+        .filter(new Predicate<Integer>() {
+            @Override
+            public boolean test(Integer v) throws Exception {
+                return v % 2 == 0;
+            }
+        })
+        .test()
+        .assertResult(2, 4);
+    }
+
+    @Test
+    public void conditionalNormal2() {
+        Flowable.just(1, 2, 1, 3, 3, 4, 3, 5, 5).hide()
+        .distinctUntilChanged()
+        .filter(new Predicate<Integer>() {
+            @Override
+            public boolean test(Integer v) throws Exception {
+                return v % 2 == 0;
+            }
+        })
+        .test()
+        .assertResult(2, 4);
+    }
+
+    @Test
+    public void conditionalNormal3() {
+        UnicastProcessor<Integer> up = UnicastProcessor.create();
+
+        TestSubscriber<Integer> ts = up.hide()
+        .distinctUntilChanged()
+        .filter(new Predicate<Integer>() {
+            @Override
+            public boolean test(Integer v) throws Exception {
+                return v % 2 == 0;
+            }
+        })
+        .test();
+
+        TestHelper.emit(up, 1, 2, 1, 3, 3, 4, 3, 5, 5);
+
+        ts
+        .assertResult(2, 4);
+    }
+
+    @Test
+    public void conditionalSelectorCrash() {
+        Flowable.just(1, 2, 1, 3, 3, 4, 3, 5, 5)
+        .distinctUntilChanged(new BiPredicate<Integer, Integer>() {
+            @Override
+            public boolean test(Integer a, Integer b) throws Exception {
+                throw new TestException();
+            }
+        })
+        .filter(new Predicate<Integer>() {
+            @Override
+            public boolean test(Integer v) throws Exception {
+                return v % 2 == 0;
+            }
+        })
+        .test()
+        .assertFailure(TestException.class);
+    }
+
+    @Test
+    public void conditionalFused() {
+        TestSubscriber<Integer> ts = SubscriberFusion.newTest(QueueFuseable.ANY);
+
+        Flowable.just(1, 2, 1, 3, 3, 4, 3, 5, 5)
+        .distinctUntilChanged()
+        .filter(new Predicate<Integer>() {
+            @Override
+            public boolean test(Integer v) throws Exception {
+                return v % 2 == 0;
+            }
+        })
+        .subscribe(ts);
+
+        SubscriberFusion.assertFusion(ts, QueueFuseable.SYNC)
+        .assertResult(2, 4);
+    }
+
+    @Test
+    public void conditionalAsyncFused() {
+        TestSubscriber<Integer> ts = SubscriberFusion.newTest(QueueFuseable.ANY);
+        UnicastProcessor<Integer> up = UnicastProcessor.create();
+
+        up
+        .distinctUntilChanged()
+        .filter(new Predicate<Integer>() {
+            @Override
+            public boolean test(Integer v) throws Exception {
+                return v % 2 == 0;
+            }
+        })
+        .subscribe(ts);
+
+        TestHelper.emit(up, 1, 2, 1, 3, 3, 4, 3, 5, 5);
+
+        SubscriberFusion.assertFusion(ts, QueueFuseable.ASYNC)
+        .assertResult(2, 4);
+    }
+
+    @Test
+    public void badSource() {
+        TestHelper.checkBadSourceFlowable(new Function<Flowable<Integer>, Object>() {
+            @Override
+            public Object apply(Flowable<Integer> f) throws Exception {
+                return f.distinctUntilChanged().filter(Functions.alwaysTrue());
+            }
+        }, false, 1, 1, 1);
     }
 }

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,172 +13,197 @@
 
 package io.reactivex.internal.operators.flowable;
 
-import java.util.Queue;
-import java.util.concurrent.atomic.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.reactivestreams.*;
 
-import io.reactivex.Flowable;
-import io.reactivex.exceptions.MissingBackpressureException;
+import io.reactivex.*;
+import io.reactivex.annotations.Nullable;
+import io.reactivex.exceptions.*;
+import io.reactivex.functions.Action;
+import io.reactivex.internal.fuseable.SimplePlainQueue;
 import io.reactivex.internal.queue.*;
-import io.reactivex.internal.subscriptions.SubscriptionHelper;
-import io.reactivex.internal.util.*;
+import io.reactivex.internal.subscriptions.*;
+import io.reactivex.internal.util.BackpressureHelper;
 
-public final class FlowableOnBackpressureBuffer<T> extends Flowable<T> {
-    final Publisher<T> source;
+public final class FlowableOnBackpressureBuffer<T> extends AbstractFlowableWithUpstream<T, T> {
     final int bufferSize;
     final boolean unbounded;
     final boolean delayError;
-    final Runnable onOverflow;
-    
-    public FlowableOnBackpressureBuffer(Publisher<T> source, int bufferSize, boolean unbounded, boolean delayError, Runnable onOverflow) {
-        this.source = source;
+    final Action onOverflow;
+
+    public FlowableOnBackpressureBuffer(Flowable<T> source, int bufferSize, boolean unbounded,
+            boolean delayError, Action onOverflow) {
+        super(source);
         this.bufferSize = bufferSize;
         this.unbounded = unbounded;
         this.delayError = delayError;
         this.onOverflow = onOverflow;
     }
-    
+
     @Override
     protected void subscribeActual(Subscriber<? super T> s) {
         source.subscribe(new BackpressureBufferSubscriber<T>(s, bufferSize, unbounded, delayError, onOverflow));
     }
-    
-    static final class BackpressureBufferSubscriber<T> extends AtomicInteger implements Subscriber<T>, Subscription {
-        /** */
+
+    static final class BackpressureBufferSubscriber<T> extends BasicIntQueueSubscription<T> implements FlowableSubscriber<T> {
+
         private static final long serialVersionUID = -2514538129242366402L;
-        final Subscriber<? super T> actual;
-        final Queue<T> queue;
+
+        final Subscriber<? super T> downstream;
+        final SimplePlainQueue<T> queue;
         final boolean delayError;
-        final Runnable onOverflow;
-        
-        Subscription s;
-        
+        final Action onOverflow;
+
+        Subscription upstream;
+
         volatile boolean cancelled;
-        
+
         volatile boolean done;
         Throwable error;
-        
+
         final AtomicLong requested = new AtomicLong();
-        
-        public BackpressureBufferSubscriber(Subscriber<? super T> actual, int bufferSize, 
-                boolean unbounded, boolean delayError, Runnable onOverflow) {
-            this.actual = actual;
+
+        boolean outputFused;
+
+        BackpressureBufferSubscriber(Subscriber<? super T> actual, int bufferSize,
+                boolean unbounded, boolean delayError, Action onOverflow) {
+            this.downstream = actual;
             this.onOverflow = onOverflow;
             this.delayError = delayError;
-            
-            Queue<T> q;
-            
+
+            SimplePlainQueue<T> q;
+
             if (unbounded) {
                 q = new SpscLinkedArrayQueue<T>(bufferSize);
             } else {
-                if (Pow2.isPowerOfTwo(bufferSize)) {
-                    q = new SpscArrayQueue<T>(bufferSize);
-                } else {
-                    q = new SpscExactArrayQueue<T>(bufferSize);
-                }
+                q = new SpscArrayQueue<T>(bufferSize);
             }
-            
+
             this.queue = q;
         }
-        
+
         @Override
         public void onSubscribe(Subscription s) {
-            if (SubscriptionHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
+            if (SubscriptionHelper.validate(this.upstream, s)) {
+                this.upstream = s;
+                downstream.onSubscribe(this);
                 s.request(Long.MAX_VALUE);
             }
         }
-        
+
         @Override
         public void onNext(T t) {
             if (!queue.offer(t)) {
-                s.cancel();
+                upstream.cancel();
                 MissingBackpressureException ex = new MissingBackpressureException("Buffer is full");
                 try {
                     onOverflow.run();
                 } catch (Throwable e) {
+                    Exceptions.throwIfFatal(e);
                     ex.initCause(e);
                 }
                 onError(ex);
                 return;
             }
-            drain();
+            if (outputFused) {
+                downstream.onNext(null);
+            } else {
+                drain();
+            }
         }
-        
+
         @Override
         public void onError(Throwable t) {
             error = t;
             done = true;
-            drain();
-        }
-        
-        @Override
-        public void onComplete() {
-            done = true;
-            drain();
-        }
-        
-        @Override
-        public void request(long n) {
-            if (SubscriptionHelper.validate(n)) {
-                BackpressureHelper.add(requested, n);
+            if (outputFused) {
+                downstream.onError(t);
+            } else {
                 drain();
             }
         }
-        
+
+        @Override
+        public void onComplete() {
+            done = true;
+            if (outputFused) {
+                downstream.onComplete();
+            } else {
+                drain();
+            }
+        }
+
+        @Override
+        public void request(long n) {
+            if (!outputFused) {
+                if (SubscriptionHelper.validate(n)) {
+                    BackpressureHelper.add(requested, n);
+                    drain();
+                }
+            }
+        }
+
         @Override
         public void cancel() {
             if (!cancelled) {
                 cancelled = true;
-                
+                upstream.cancel();
+
                 if (getAndIncrement() == 0) {
                     queue.clear();
-                    s.cancel();
                 }
             }
         }
-        
+
         void drain() {
             if (getAndIncrement() == 0) {
                 int missed = 1;
-                final Queue<T> q = queue;
-                final Subscriber<? super T> a = actual;
+                final SimplePlainQueue<T> q = queue;
+                final Subscriber<? super T> a = downstream;
                 for (;;) {
-                    
+
                     if (checkTerminated(done, q.isEmpty(), a)) {
                         return;
                     }
-                    
+
                     long r = requested.get();
-                    
+
                     long e = 0L;
-                    
+
                     while (e != r) {
                         boolean d = done;
                         T v = q.poll();
                         boolean empty = v == null;
-                        
+
                         if (checkTerminated(d, empty, a)) {
                             return;
                         }
-                        
+
                         if (empty) {
                             break;
                         }
-                        
+
                         a.onNext(v);
-                        
+
                         e++;
                     }
-                    
+
+                    if (e == r) {
+                        boolean d = done;
+                        boolean empty = q.isEmpty();
+
+                        if (checkTerminated(d, empty, a)) {
+                            return;
+                        }
+                    }
+
                     if (e != 0L) {
                         if (r != Long.MAX_VALUE) {
                             requested.addAndGet(-e);
                         }
                     }
-                    
+
                     missed = addAndGet(-missed);
                     if (missed == 0) {
                         break;
@@ -186,10 +211,9 @@ public final class FlowableOnBackpressureBuffer<T> extends Flowable<T> {
                 }
             }
         }
-        
+
         boolean checkTerminated(boolean d, boolean empty, Subscriber<? super T> a) {
             if (cancelled) {
-                s.cancel();
                 queue.clear();
                 return true;
             }
@@ -218,6 +242,31 @@ public final class FlowableOnBackpressureBuffer<T> extends Flowable<T> {
                 }
             }
             return false;
+        }
+
+        @Override
+        public int requestFusion(int mode) {
+            if ((mode & ASYNC) != 0) {
+                outputFused = true;
+                return ASYNC;
+            }
+            return NONE;
+        }
+
+        @Nullable
+        @Override
+        public T poll() throws Exception {
+            return queue.poll();
+        }
+
+        @Override
+        public void clear() {
+            queue.clear();
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return queue.isEmpty();
         }
     }
 }

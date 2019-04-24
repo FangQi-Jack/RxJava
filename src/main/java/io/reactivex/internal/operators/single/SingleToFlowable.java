@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -25,36 +25,35 @@ import io.reactivex.internal.subscriptions.DeferredScalarSubscription;
  * @param <T> the value type
  */
 public final class SingleToFlowable<T> extends Flowable<T> {
-    
-    final SingleConsumable<? extends T> source;
-    
-    public SingleToFlowable(SingleConsumable<? extends T> source) {
+
+    final SingleSource<? extends T> source;
+
+    public SingleToFlowable(SingleSource<? extends T> source) {
         this.source = source;
     }
-    
+
     @Override
     public void subscribeActual(final Subscriber<? super T> s) {
-        source.subscribe(new SingleToFlowableSubscriber<T>(s));
+        source.subscribe(new SingleToFlowableObserver<T>(s));
     }
-    
-    static final class SingleToFlowableSubscriber<T> extends DeferredScalarSubscription<T> 
-    implements SingleSubscriber<T> {
 
-        /** */
+    static final class SingleToFlowableObserver<T> extends DeferredScalarSubscription<T>
+    implements SingleObserver<T> {
+
         private static final long serialVersionUID = 187782011903685568L;
-        
-        Disposable d;
-        
-        public SingleToFlowableSubscriber(Subscriber<? super T> actual) {
-            super(actual);
+
+        Disposable upstream;
+
+        SingleToFlowableObserver(Subscriber<? super T> downstream) {
+            super(downstream);
         }
 
         @Override
         public void onSubscribe(Disposable d) {
-            if (DisposableHelper.validate(this.d, d)) {
-                this.d = d;
-                
-                actual.onSubscribe(this);
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+
+                downstream.onSubscribe(this);
             }
         }
 
@@ -65,13 +64,13 @@ public final class SingleToFlowable<T> extends Flowable<T> {
 
         @Override
         public void onError(Throwable e) {
-            actual.onError(e);
+            downstream.onError(e);
         }
 
         @Override
         public void cancel() {
             super.cancel();
-            d.dispose();
+            upstream.dispose();
         }
     }
 }

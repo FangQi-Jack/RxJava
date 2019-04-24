@@ -1,12 +1,12 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,31 +23,31 @@ import java.util.*;
 import org.junit.Test;
 
 import io.reactivex.Observable;
-import io.reactivex.Observable.NbpTransformer;
+import io.reactivex.ObservableTransformer;
 import io.reactivex.functions.*;
 import io.reactivex.observables.GroupedObservable;
 import io.reactivex.observers.TestObserver;
 
 /**
  * Test super/extends of generics.
- * 
+ *
  * See https://github.com/Netflix/RxJava/pull/331
  */
 public class ObservableCovarianceTest {
 
     /**
-     * This won't compile if super/extends isn't done correctly on generics
+     * This won't compile if super/extends isn't done correctly on generics.
      */
     @Test
     public void testCovarianceOfFrom() {
         Observable.<Movie> just(new HorrorMovie());
         Observable.<Movie> fromIterable(new ArrayList<HorrorMovie>());
-        // NbpObservable.<HorrorMovie>from(new Movie()); // may not compile
+        // Observable.<HorrorMovie>from(new Movie()); // may not compile
     }
 
     @Test
     public void testSortedList() {
-        Comparator<Media> SORT_FUNCTION = new Comparator<Media>() {
+        Comparator<Media> sortFunction = new Comparator<Media>() {
             @Override
             public int compare(Media t1, Media t2) {
                 return 1;
@@ -56,17 +56,17 @@ public class ObservableCovarianceTest {
 
         // this one would work without the covariance generics
         Observable<Media> o = Observable.just(new Movie(), new TVSeason(), new Album());
-        o.toSortedList(SORT_FUNCTION);
+        o.toSortedList(sortFunction);
 
         // this one would NOT work without the covariance generics
         Observable<Movie> o2 = Observable.just(new Movie(), new ActionMovie(), new HorrorMovie());
-        o2.toSortedList(SORT_FUNCTION);
+        o2.toSortedList(sortFunction);
     }
 
     @Test
     public void testGroupByCompose() {
         Observable<Movie> movies = Observable.just(new HorrorMovie(), new ActionMovie(), new Movie());
-        TestObserver<String> ts = new TestObserver<String>();
+        TestObserver<String> to = new TestObserver<String>();
         movies
         .groupBy(new Function<Movie, Object>() {
             @Override
@@ -77,7 +77,7 @@ public class ObservableCovarianceTest {
         .doOnNext(new Consumer<GroupedObservable<Object, Movie>>() {
             @Override
             public void accept(GroupedObservable<Object, Movie> g) {
-                System.out.println(g.key());
+                System.out.println(g.getKey());
             }
         })
         .flatMap(new Function<GroupedObservable<Object, Movie>, Observable<String>>() {
@@ -90,7 +90,7 @@ public class ObservableCovarianceTest {
                         System.out.println(pv);
                     }
                 })
-                .compose(new Function<Observable<Movie>, Observable<Movie>>() {
+                .compose(new ObservableTransformer<Movie, Movie>() {
                     @Override
                     public Observable<Movie> apply(Observable<Movie> m) {
                         return m.concatWith(Observable.just(new ActionMovie()));
@@ -105,42 +105,42 @@ public class ObservableCovarianceTest {
                 });
             }
         })
-        .subscribe(ts);
-        ts.assertTerminated();
-        ts.assertNoErrors();
+        .subscribe(to);
+        to.assertTerminated();
+        to.assertNoErrors();
         //        System.out.println(ts.getOnNextEvents());
-        assertEquals(6, ts.valueCount());
+        assertEquals(6, to.valueCount());
     }
 
     @SuppressWarnings("unused")
     @Test
     public void testCovarianceOfCompose() {
         Observable<HorrorMovie> movie = Observable.just(new HorrorMovie());
-        Observable<Movie> movie2 = movie.compose(new Function<Observable<HorrorMovie>, Observable<Movie>>() {
+        Observable<Movie> movie2 = movie.compose(new ObservableTransformer<HorrorMovie, Movie>() {
             @Override
             public Observable<Movie> apply(Observable<HorrorMovie> t) {
                 return Observable.just(new Movie());
             }
         });
     }
-    
+
     @SuppressWarnings("unused")
     @Test
     public void testCovarianceOfCompose2() {
         Observable<Movie> movie = Observable.<Movie> just(new HorrorMovie());
-        Observable<HorrorMovie> movie2 = movie.compose(new Function<Observable<Movie>, Observable<HorrorMovie>>() {
+        Observable<HorrorMovie> movie2 = movie.compose(new ObservableTransformer<Movie, HorrorMovie>() {
             @Override
             public Observable<HorrorMovie> apply(Observable<Movie> t) {
                 return Observable.just(new HorrorMovie());
             }
         });
     }
-    
+
     @SuppressWarnings("unused")
     @Test
     public void testCovarianceOfCompose3() {
         Observable<Movie> movie = Observable.<Movie>just(new HorrorMovie());
-        Observable<HorrorMovie> movie2 = movie.compose(new Function<Observable<Movie>, Observable<HorrorMovie>>() {
+        Observable<HorrorMovie> movie2 = movie.compose(new ObservableTransformer<Movie, HorrorMovie>() {
             @Override
             public Observable<HorrorMovie> apply(Observable<Movie> t) {
                 return Observable.just(new HorrorMovie()).map(new Function<HorrorMovie, HorrorMovie>() {
@@ -158,7 +158,7 @@ public class ObservableCovarianceTest {
     @Test
     public void testCovarianceOfCompose4() {
         Observable<HorrorMovie> movie = Observable.just(new HorrorMovie());
-        Observable<HorrorMovie> movie2 = movie.compose(new Function<Observable<HorrorMovie>, Observable<HorrorMovie>>() {
+        Observable<HorrorMovie> movie2 = movie.compose(new ObservableTransformer<HorrorMovie, HorrorMovie>() {
             @Override
             public Observable<HorrorMovie> apply(Observable<HorrorMovie> t1) {
                 return t1.map(new Function<HorrorMovie, HorrorMovie>() {
@@ -170,7 +170,7 @@ public class ObservableCovarianceTest {
             }
         });
     }
-    
+
     @Test
     public void testComposeWithDeltaLogic() {
         List<Movie> list1 = Arrays.asList(new Movie(), new HorrorMovie(), new ActionMovie());
@@ -206,8 +206,8 @@ public class ObservableCovarianceTest {
             }
         }
     };
-    
-    static NbpTransformer<List<Movie>, Movie> deltaTransformer = new NbpTransformer<List<Movie>, Movie>() {
+
+    static ObservableTransformer<List<Movie>, Movie> deltaTransformer = new ObservableTransformer<List<Movie>, Movie>() {
         @Override
         public Observable<Movie> apply(Observable<List<Movie>> movieList) {
             return movieList

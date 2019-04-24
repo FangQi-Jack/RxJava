@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,68 +13,73 @@
 
 package io.reactivex.internal.operators.observable;
 
-import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import io.reactivex.*;
-import io.reactivex.disposables.*;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.exceptions.Exceptions;
 import io.reactivex.functions.BiPredicate;
 import io.reactivex.internal.disposables.ArrayCompositeDisposable;
 import io.reactivex.internal.queue.SpscLinkedArrayQueue;
 
 public final class ObservableSequenceEqual<T> extends Observable<Boolean> {
-    final ObservableConsumable<? extends T> first;
-    final ObservableConsumable<? extends T> second;
+    final ObservableSource<? extends T> first;
+    final ObservableSource<? extends T> second;
     final BiPredicate<? super T, ? super T> comparer;
     final int bufferSize;
-    
-    public ObservableSequenceEqual(ObservableConsumable<? extends T> first, ObservableConsumable<? extends T> second,
-            BiPredicate<? super T, ? super T> comparer, int bufferSize) {
+
+    public ObservableSequenceEqual(ObservableSource<? extends T> first, ObservableSource<? extends T> second,
+                                   BiPredicate<? super T, ? super T> comparer, int bufferSize) {
         this.first = first;
         this.second = second;
         this.comparer = comparer;
         this.bufferSize = bufferSize;
     }
-    
+
     @Override
-    public void subscribeActual(Observer<? super Boolean> s) {
-        EqualCoordinator<T> ec = new EqualCoordinator<T>(s, bufferSize, first, second, comparer);
+    public void subscribeActual(Observer<? super Boolean> observer) {
+        EqualCoordinator<T> ec = new EqualCoordinator<T>(observer, bufferSize, first, second, comparer);
+        observer.onSubscribe(ec);
         ec.subscribe();
     }
-    
+
     static final class EqualCoordinator<T> extends AtomicInteger implements Disposable {
-        /** */
+
         private static final long serialVersionUID = -6178010334400373240L;
-        final Observer<? super Boolean> actual;
+        final Observer<? super Boolean> downstream;
         final BiPredicate<? super T, ? super T> comparer;
         final ArrayCompositeDisposable resources;
-        final ObservableConsumable<? extends T> first;
-        final ObservableConsumable<? extends T> second;
-        final EqualSubscriber<T>[] subscribers;
-        
+        final ObservableSource<? extends T> first;
+        final ObservableSource<? extends T> second;
+        final EqualObserver<T>[] observers;
+
         volatile boolean cancelled;
-        
-        public EqualCoordinator(Observer<? super Boolean> actual, int bufferSize,
-                ObservableConsumable<? extends T> first, ObservableConsumable<? extends T> second,
-                BiPredicate<? super T, ? super T> comparer) {
-            this.actual = actual;
+
+        T v1;
+
+        T v2;
+
+        EqualCoordinator(Observer<? super Boolean> actual, int bufferSize,
+                                ObservableSource<? extends T> first, ObservableSource<? extends T> second,
+                                BiPredicate<? super T, ? super T> comparer) {
+            this.downstream = actual;
             this.first = first;
             this.second = second;
             this.comparer = comparer;
             @SuppressWarnings("unchecked")
-            EqualSubscriber<T>[] as = new EqualSubscriber[2];
-            this.subscribers = as;
-            as[0] = new EqualSubscriber<T>(this, 0, bufferSize);
-            as[1] = new EqualSubscriber<T>(this, 1, bufferSize);
+            EqualObserver<T>[] as = new EqualObserver[2];
+            this.observers = as;
+            as[0] = new EqualObserver<T>(this, 0, bufferSize);
+            as[1] = new EqualObserver<T>(this, 1, bufferSize);
             this.resources = new ArrayCompositeDisposable(2);
         }
-        
-        boolean setSubscription(Disposable s, int index) {
-            return resources.setResource(index, s);
+
+        boolean setDisposable(Disposable d, int index) {
+            return resources.setResource(index, d);
         }
-        
+
         void subscribe() {
-            EqualSubscriber<T>[] as = subscribers;
+            EqualObserver<T>[] as = observers;
             first.subscribe(as[0]);
             second.subscribe(as[1]);
         }
@@ -84,9 +89,9 @@ public final class ObservableSequenceEqual<T> extends Observable<Boolean> {
             if (!cancelled) {
                 cancelled = true;
                 resources.dispose();
-                
+
                 if (getAndIncrement() == 0) {
-                    EqualSubscriber<T>[] as = subscribers;
+                    EqualObserver<T>[] as = observers;
                     as[0].queue.clear();
                     as[1].queue.clear();
                 }
@@ -98,104 +103,110 @@ public final class ObservableSequenceEqual<T> extends Observable<Boolean> {
             return cancelled;
         }
 
-        void cancel(Queue<T> q1, Queue<T> q2) {
+        void cancel(SpscLinkedArrayQueue<T> q1, SpscLinkedArrayQueue<T> q2) {
             cancelled = true;
             q1.clear();
             q2.clear();
         }
-        
+
         void drain() {
             if (getAndIncrement() != 0) {
                 return;
             }
-            
+
             int missed = 1;
-            EqualSubscriber<T>[] as = subscribers;
-            
-            final EqualSubscriber<T> s1 = as[0];
-            final Queue<T> q1 = s1.queue;
-            final EqualSubscriber<T> s2 = as[1];
-            final Queue<T> q2 = s2.queue;
-            
+            EqualObserver<T>[] as = observers;
+
+            final EqualObserver<T> observer1 = as[0];
+            final SpscLinkedArrayQueue<T> q1 = observer1.queue;
+            final EqualObserver<T> observer2 = as[1];
+            final SpscLinkedArrayQueue<T> q2 = observer2.queue;
+
             for (;;) {
-                
+
                 for (;;) {
                     if (cancelled) {
                         q1.clear();
                         q2.clear();
                         return;
                     }
-                    
-                    boolean d1 = s1.done;
-                    
+
+                    boolean d1 = observer1.done;
+
                     if (d1) {
-                        Throwable e = s1.error;
+                        Throwable e = observer1.error;
                         if (e != null) {
                             cancel(q1, q2);
-                            
-                            actual.onError(e);
-                            return;
-                        }
-                    }
-                    
-                    boolean d2 = s2.done;
-                    if (d2) {
-                        Throwable e = s2.error;
-                        if (e != null) {
-                            cancel(q1, q2);
-                            
-                            actual.onError(e);
+
+                            downstream.onError(e);
                             return;
                         }
                     }
 
-                    T v1 = q1.peek();
+                    boolean d2 = observer2.done;
+                    if (d2) {
+                        Throwable e = observer2.error;
+                        if (e != null) {
+                            cancel(q1, q2);
+
+                            downstream.onError(e);
+                            return;
+                        }
+                    }
+
+                    if (v1 == null) {
+                        v1 = q1.poll();
+                    }
                     boolean e1 = v1 == null;
 
-                    T v2 = q2.peek();
+                    if (v2 == null) {
+                        v2 = q2.poll();
+                    }
                     boolean e2 = v2 == null;
 
                     if (d1 && d2 && e1 && e2) {
-                        actual.onNext(true);
-                        actual.onComplete();
+                        downstream.onNext(true);
+                        downstream.onComplete();
                         return;
                     }
                     if ((d1 && d2) && (e1 != e2)) {
                         cancel(q1, q2);
-                        
-                        actual.onNext(false);
-                        actual.onComplete();
+
+                        downstream.onNext(false);
+                        downstream.onComplete();
                         return;
                     }
-                    
+
                     if (!e1 && !e2) {
-                        q1.poll();
-                        q2.poll();
                         boolean c;
-                        
+
                         try {
                             c = comparer.test(v1, v2);
                         } catch (Throwable ex) {
+                            Exceptions.throwIfFatal(ex);
                             cancel(q1, q2);
-                            
-                            actual.onError(ex);
+
+                            downstream.onError(ex);
                             return;
                         }
-                        
+
                         if (!c) {
                             cancel(q1, q2);
-                            
-                            actual.onNext(false);
-                            actual.onComplete();
+
+                            downstream.onNext(false);
+                            downstream.onComplete();
                             return;
                         }
+
+                        v1 = null;
+                        v2 = null;
                     }
-                    
+
                     if (e1 || e2) {
                         break;
                     }
                 }
-                
+
                 missed = addAndGet(-missed);
                 if (missed == 0) {
                     break;
@@ -203,46 +214,39 @@ public final class ObservableSequenceEqual<T> extends Observable<Boolean> {
             }
         }
     }
-    
-    static final class EqualSubscriber<T> implements Observer<T> {
+
+    static final class EqualObserver<T> implements Observer<T> {
         final EqualCoordinator<T> parent;
-        final Queue<T> queue;
+        final SpscLinkedArrayQueue<T> queue;
         final int index;
-        
+
         volatile boolean done;
         Throwable error;
-        
-        Disposable s;
-        
-        public EqualSubscriber(EqualCoordinator<T> parent, int index, int bufferSize) {
+
+        EqualObserver(EqualCoordinator<T> parent, int index, int bufferSize) {
             this.parent = parent;
             this.index = index;
             this.queue = new SpscLinkedArrayQueue<T>(bufferSize);
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (parent.setSubscription(s, index)) {
-                this.s = s;
-            }
+        public void onSubscribe(Disposable d) {
+            parent.setDisposable(d, index);
         }
-        
+
         @Override
         public void onNext(T t) {
-            if (!queue.offer(t)) {
-                onError(new IllegalStateException("Queue full?!"));
-                return;
-            }
+            queue.offer(t);
             parent.drain();
         }
-        
+
         @Override
         public void onError(Throwable t) {
             error = t;
             done = true;
             parent.drain();
         }
-        
+
         @Override
         public void onComplete() {
             done = true;

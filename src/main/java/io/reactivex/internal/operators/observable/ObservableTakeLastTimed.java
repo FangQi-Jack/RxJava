@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,16 +13,15 @@
 
 package io.reactivex.internal.operators.observable;
 
-import java.util.Queue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
 import io.reactivex.internal.disposables.DisposableHelper;
 import io.reactivex.internal.queue.SpscLinkedArrayQueue;
 
-public final class ObservableTakeLastTimed<T> extends ObservableSource<T, T> {
+public final class ObservableTakeLastTimed<T> extends AbstractObservableWithUpstream<T, T> {
     final long count;
     final long time;
     final TimeUnit unit;
@@ -30,7 +29,7 @@ public final class ObservableTakeLastTimed<T> extends ObservableSource<T, T> {
     final int bufferSize;
     final boolean delayError;
 
-    public ObservableTakeLastTimed(ObservableConsumable<T> source, 
+    public ObservableTakeLastTimed(ObservableSource<T> source,
             long count, long time, TimeUnit unit, Scheduler scheduler, int bufferSize, boolean delayError) {
         super(source);
         this.count = count;
@@ -40,32 +39,32 @@ public final class ObservableTakeLastTimed<T> extends ObservableSource<T, T> {
         this.bufferSize = bufferSize;
         this.delayError = delayError;
     }
-    
+
     @Override
     public void subscribeActual(Observer<? super T> t) {
-        source.subscribe(new TakeLastTimedSubscriber<T>(t, count, time, unit, scheduler, bufferSize, delayError));
+        source.subscribe(new TakeLastTimedObserver<T>(t, count, time, unit, scheduler, bufferSize, delayError));
     }
-    
-    static final class TakeLastTimedSubscriber<T> extends AtomicInteger implements Observer<T>, Disposable {
-        /** */
+
+    static final class TakeLastTimedObserver<T>
+    extends AtomicBoolean implements Observer<T>, Disposable {
+
         private static final long serialVersionUID = -5677354903406201275L;
-        final Observer<? super T> actual;
+        final Observer<? super T> downstream;
         final long count;
         final long time;
         final TimeUnit unit;
         final Scheduler scheduler;
-        final Queue<Object> queue;
+        final SpscLinkedArrayQueue<Object> queue;
         final boolean delayError;
-        
-        Disposable s;
-        
+
+        Disposable upstream;
+
         volatile boolean cancelled;
-        
-        volatile boolean done;
+
         Throwable error;
 
-        public TakeLastTimedSubscriber(Observer<? super T> actual, long count, long time, TimeUnit unit, Scheduler scheduler, int bufferSize, boolean delayError) {
-            this.actual = actual;
+        TakeLastTimedObserver(Observer<? super T> actual, long count, long time, TimeUnit unit, Scheduler scheduler, int bufferSize, boolean delayError) {
+            this.downstream = actual;
             this.count = count;
             this.time = time;
             this.unit = unit;
@@ -73,27 +72,26 @@ public final class ObservableTakeLastTimed<T> extends ObservableSource<T, T> {
             this.queue = new SpscLinkedArrayQueue<Object>(bufferSize);
             this.delayError = delayError;
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+                downstream.onSubscribe(this);
             }
         }
-        
+
         @Override
         public void onNext(T t) {
-            final Queue<Object> q = queue;
+            final SpscLinkedArrayQueue<Object> q = queue;
 
             long now = scheduler.now(unit);
             long time = this.time;
             long c = count;
             boolean unbounded = c == Long.MAX_VALUE;
-            
-            q.offer(now);
-            q.offer(t);
-            
+
+            q.offer(now, t);
+
             while (!q.isEmpty()) {
                 long ts = (Long)q.peek();
                 if (ts <= now - time || (!unbounded && (q.size() >> 1) > c)) {
@@ -104,28 +102,26 @@ public final class ObservableTakeLastTimed<T> extends ObservableSource<T, T> {
                 }
             }
         }
-        
+
         @Override
         public void onError(Throwable t) {
             error = t;
-            done = true;
             drain();
         }
-        
+
         @Override
         public void onComplete() {
-            done = true;
             drain();
         }
-        
+
         @Override
         public void dispose() {
-            if (cancelled) {
+            if (!cancelled) {
                 cancelled = true;
-                
-                if (getAndIncrement() == 0) {
+                upstream.dispose();
+
+                if (compareAndSet(false, true)) {
                     queue.clear();
-                    s.dispose();
                 }
             }
         }
@@ -136,89 +132,51 @@ public final class ObservableTakeLastTimed<T> extends ObservableSource<T, T> {
         }
 
         void drain() {
-            if (getAndIncrement() != 0) {
+            if (!compareAndSet(false, true)) {
                 return;
             }
-            
-            int missed = 1;
-            
-            final Observer<? super T> a = actual;
-            final Queue<Object> q = queue;
+
+            final Observer<? super T> a = downstream;
+            final SpscLinkedArrayQueue<Object> q = queue;
             final boolean delayError = this.delayError;
-            
+
             for (;;) {
-                
-                if (done) {
-                    boolean empty = q.isEmpty();
-                    
-                    if (checkTerminated(empty, a, delayError)) {
+                if (cancelled) {
+                    q.clear();
+                    return;
+                }
+
+                if (!delayError) {
+                    Throwable ex = error;
+                    if (ex != null) {
+                        q.clear();
+                        a.onError(ex);
                         return;
                     }
-                    
-                    for (;;) {
-                        Object ts = q.poll(); // the timestamp long
-                        empty = ts == null;
-                        
-                        if (checkTerminated(empty, a, delayError)) {
-                            return;
-                        }
-                        
-                        if (empty) {
-                            break;
-                        }
-                        
-                        @SuppressWarnings("unchecked")
-                        T o = (T)q.poll();
-                        if (o == null) {
-                            s.dispose();
-                            a.onError(new IllegalStateException("Queue empty?!"));
-                            return;
-                        }
-                        
-                        if ((Long)ts < scheduler.now(unit) - time) {
-                            continue;
-                        }
-                        
-                        a.onNext(o);
-                    }
                 }
-                
-                missed = addAndGet(-missed);
-                if (missed == 0) {
-                    break;
-                }
-            }
-        }
-        
-        boolean checkTerminated(boolean empty, Observer<? super T> a, boolean delayError) {
-            if (cancelled) {
-                queue.clear();
-                s.dispose();
-                return true;
-            }
-            if (delayError) {
+
+                Object ts = q.poll(); // the timestamp long
+                boolean empty = ts == null;
+
                 if (empty) {
-                    Throwable e = error;
-                    if (e != null) {
-                        a.onError(e);
+                    Throwable ex = error;
+                    if (ex != null) {
+                        a.onError(ex);
                     } else {
                         a.onComplete();
                     }
-                    return true;
+                    return;
                 }
-            } else {
-                Throwable e = error;
-                if (e != null) {
-                    queue.clear();
-                    a.onError(e);
-                    return true;
-                } else
-                if (empty) {
-                    a.onComplete();
-                    return true;
+
+                @SuppressWarnings("unchecked")
+                T o = (T)q.poll();
+
+                if ((Long)ts < scheduler.now(unit) - time) {
+                    continue;
                 }
+
+                a.onNext(o);
             }
-            return false;
         }
     }
 }

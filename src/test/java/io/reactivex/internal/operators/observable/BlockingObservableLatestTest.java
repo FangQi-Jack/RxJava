@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,13 +13,18 @@
 
 package io.reactivex.internal.operators.observable;
 
+import static org.junit.Assert.*;
+
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.*;
 
 import io.reactivex.Observable;
-import io.reactivex.observables.BlockingObservable;
+import io.reactivex.Observer;
+import io.reactivex.TestHelper;
+import io.reactivex.exceptions.TestException;
+import io.reactivex.plugins.RxJavaPlugins;
 import io.reactivex.schedulers.TestScheduler;
 import io.reactivex.subjects.PublishSubject;
 
@@ -28,14 +33,14 @@ public class BlockingObservableLatestTest {
     public void testSimple() {
         TestScheduler scheduler = new TestScheduler();
 
-        BlockingObservable<Long> source = Observable.interval(1, TimeUnit.SECONDS, scheduler).take(10).toBlocking();
+        Observable<Long> source = Observable.interval(1, TimeUnit.SECONDS, scheduler).take(10);
 
-        Iterable<Long> iter = source.latest();
+        Iterable<Long> iter = source.blockingLatest();
 
         Iterator<Long> it = iter.iterator();
 
-        // only 9 because take(10) will immediately call onCompleted when receiving the 10th item
-        // which onCompleted will overwrite the previous value
+        // only 9 because take(10) will immediately call onComplete when receiving the 10th item
+        // which onComplete will overwrite the previous value
         for (int i = 0; i < 9; i++) {
             scheduler.advanceTimeBy(1, TimeUnit.SECONDS);
 
@@ -52,15 +57,15 @@ public class BlockingObservableLatestTest {
     public void testSameSourceMultipleIterators() {
         TestScheduler scheduler = new TestScheduler();
 
-        BlockingObservable<Long> source = Observable.interval(1, TimeUnit.SECONDS, scheduler).take(10).toBlocking();
+        Observable<Long> source = Observable.interval(1, TimeUnit.SECONDS, scheduler).take(10);
 
-        Iterable<Long> iter = source.latest();
+        Iterable<Long> iter = source.blockingLatest();
 
         for (int j = 0; j < 3; j++) {
             Iterator<Long> it = iter.iterator();
 
-            // only 9 because take(10) will immediately call onCompleted when receiving the 10th item
-            // which onCompleted will overwrite the previous value
+            // only 9 because take(10) will immediately call onComplete when receiving the 10th item
+            // which onComplete will overwrite the previous value
             for (int i = 0; i < 9; i++) {
                 scheduler.advanceTimeBy(1, TimeUnit.SECONDS);
 
@@ -76,9 +81,9 @@ public class BlockingObservableLatestTest {
 
     @Test(timeout = 1000, expected = NoSuchElementException.class)
     public void testEmpty() {
-        BlockingObservable<Long> source = Observable.<Long> empty().toBlocking();
+        Observable<Long> source = Observable.<Long> empty();
 
-        Iterable<Long> iter = source.latest();
+        Iterable<Long> iter = source.blockingLatest();
 
         Iterator<Long> it = iter.iterator();
 
@@ -91,14 +96,14 @@ public class BlockingObservableLatestTest {
     public void testSimpleJustNext() {
         TestScheduler scheduler = new TestScheduler();
 
-        BlockingObservable<Long> source = Observable.interval(1, TimeUnit.SECONDS, scheduler).take(10).toBlocking();
+        Observable<Long> source = Observable.interval(1, TimeUnit.SECONDS, scheduler).take(10);
 
-        Iterable<Long> iter = source.latest();
+        Iterable<Long> iter = source.blockingLatest();
 
         Iterator<Long> it = iter.iterator();
 
-        // only 9 because take(10) will immediately call onCompleted when receiving the 10th item
-        // which onCompleted will overwrite the previous value
+        // only 9 because take(10) will immediately call onComplete when receiving the 10th item
+        // which onComplete will overwrite the previous value
         for (int i = 0; i < 10; i++) {
             scheduler.advanceTimeBy(1, TimeUnit.SECONDS);
 
@@ -110,9 +115,9 @@ public class BlockingObservableLatestTest {
     public void testHasNextThrows() {
         TestScheduler scheduler = new TestScheduler();
 
-        BlockingObservable<Long> source = Observable.<Long> error(new RuntimeException("Forced failure!")).subscribeOn(scheduler).toBlocking();
+        Observable<Long> source = Observable.<Long> error(new RuntimeException("Forced failure!")).subscribeOn(scheduler);
 
-        Iterable<Long> iter = source.latest();
+        Iterable<Long> iter = source.blockingLatest();
 
         Iterator<Long> it = iter.iterator();
 
@@ -125,9 +130,9 @@ public class BlockingObservableLatestTest {
     public void testNextThrows() {
         TestScheduler scheduler = new TestScheduler();
 
-        BlockingObservable<Long> source = Observable.<Long> error(new RuntimeException("Forced failure!")).subscribeOn(scheduler).toBlocking();
+        Observable<Long> source = Observable.<Long> error(new RuntimeException("Forced failure!")).subscribeOn(scheduler);
 
-        Iterable<Long> iter = source.latest();
+        Iterable<Long> iter = source.blockingLatest();
         Iterator<Long> it = iter.iterator();
 
         scheduler.advanceTimeBy(1, TimeUnit.SECONDS);
@@ -138,9 +143,9 @@ public class BlockingObservableLatestTest {
     @Test(timeout = 1000)
     public void testFasterSource() {
         PublishSubject<Integer> source = PublishSubject.create();
-        BlockingObservable<Integer> blocker = source.toBlocking();
+        Observable<Integer> blocker = source;
 
-        Iterable<Integer> iter = blocker.latest();
+        Iterable<Integer> iter = blocker.blockingLatest();
         Iterator<Integer> it = iter.iterator();
 
         source.onNext(1);
@@ -162,5 +167,63 @@ public class BlockingObservableLatestTest {
         source.onComplete();
 
         Assert.assertEquals(false, it.hasNext());
+    }
+
+    @Test(expected = UnsupportedOperationException.class)
+    public void remove() {
+        Observable.never().blockingLatest().iterator().remove();
+    }
+
+    @Test(expected = NoSuchElementException.class)
+    public void empty() {
+        Observable.empty().blockingLatest().iterator().next();
+    }
+
+    @Test(expected = TestException.class)
+    public void error() {
+        Observable.error(new TestException()).blockingLatest().iterator().next();
+    }
+
+    @Test
+    public void error2() {
+        Iterator<Object> it = Observable.error(new TestException()).blockingLatest().iterator();
+
+        for (int i = 0; i < 3; i++) {
+            try {
+                it.hasNext();
+                fail("Should have thrown");
+            } catch (TestException ex) {
+                // expected
+            }
+        }
+    }
+
+    @Test
+    public void interrupted() {
+        Iterator<Object> it = Observable.never().blockingLatest().iterator();
+
+        Thread.currentThread().interrupt();
+
+        try {
+            it.hasNext();
+        } catch (RuntimeException ex) {
+            assertTrue(ex.toString(), ex.getCause() instanceof InterruptedException);
+        }
+        Thread.interrupted();
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void onError() {
+        Iterator<Object> it = Observable.never().blockingLatest().iterator();
+
+        List<Throwable> errors = TestHelper.trackPluginErrors();
+        try {
+            ((Observer<Object>)it).onError(new TestException());
+
+            TestHelper.assertUndeliverable(errors, 0, TestException.class);
+        } finally {
+            RxJavaPlugins.reset();
+        }
     }
 }

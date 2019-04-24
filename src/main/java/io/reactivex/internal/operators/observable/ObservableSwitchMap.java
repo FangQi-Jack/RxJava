@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,101 +13,111 @@
 
 package io.reactivex.internal.operators.observable;
 
-import java.util.Queue;
 import java.util.concurrent.atomic.*;
-
-import org.reactivestreams.Subscriber;
 
 import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
+import io.reactivex.exceptions.Exceptions;
 import io.reactivex.functions.Function;
 import io.reactivex.internal.disposables.DisposableHelper;
-import io.reactivex.internal.queue.*;
-import io.reactivex.internal.util.Pow2;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.fuseable.*;
+import io.reactivex.internal.queue.SpscLinkedArrayQueue;
+import io.reactivex.internal.util.AtomicThrowable;
 import io.reactivex.plugins.RxJavaPlugins;
 
-public final class ObservableSwitchMap<T, R> extends ObservableSource<T, R> {
-    final Function<? super T, ? extends ObservableConsumable<? extends R>> mapper;
+public final class ObservableSwitchMap<T, R> extends AbstractObservableWithUpstream<T, R> {
+    final Function<? super T, ? extends ObservableSource<? extends R>> mapper;
     final int bufferSize;
 
-    public ObservableSwitchMap(ObservableConsumable<T> source, 
-            Function<? super T, ? extends ObservableConsumable<? extends R>> mapper, int bufferSize) {
+    final boolean delayErrors;
+
+    public ObservableSwitchMap(ObservableSource<T> source,
+                               Function<? super T, ? extends ObservableSource<? extends R>> mapper, int bufferSize,
+                                       boolean delayErrors) {
         super(source);
         this.mapper = mapper;
         this.bufferSize = bufferSize;
+        this.delayErrors = delayErrors;
     }
-    
+
     @Override
     public void subscribeActual(Observer<? super R> t) {
-        source.subscribe(new SwitchMapSubscriber<T, R>(t, mapper, bufferSize));
+
+        if (ObservableScalarXMap.tryScalarXMapSubscribe(source, t, mapper)) {
+            return;
+        }
+
+        source.subscribe(new SwitchMapObserver<T, R>(t, mapper, bufferSize, delayErrors));
     }
-    
-    static final class SwitchMapSubscriber<T, R> extends AtomicInteger implements Observer<T>, Disposable {
-        /** */
+
+    static final class SwitchMapObserver<T, R> extends AtomicInteger implements Observer<T>, Disposable {
+
         private static final long serialVersionUID = -3491074160481096299L;
-        final Observer<? super R> actual;
-        final Function<? super T, ? extends ObservableConsumable<? extends R>> mapper;
+        final Observer<? super R> downstream;
+        final Function<? super T, ? extends ObservableSource<? extends R>> mapper;
         final int bufferSize;
-        
-        
+
+        final boolean delayErrors;
+
+        final AtomicThrowable errors;
+
         volatile boolean done;
-        Throwable error;
-        
+
         volatile boolean cancelled;
-        
-        Disposable s;
-        
-        final AtomicReference<SwitchMapInnerSubscriber<T, R>> active = new AtomicReference<SwitchMapInnerSubscriber<T, R>>();
-        
-        static final SwitchMapInnerSubscriber<Object, Object> CANCELLED;
+
+        Disposable upstream;
+
+        final AtomicReference<SwitchMapInnerObserver<T, R>> active = new AtomicReference<SwitchMapInnerObserver<T, R>>();
+
+        static final SwitchMapInnerObserver<Object, Object> CANCELLED;
         static {
-            CANCELLED = new SwitchMapInnerSubscriber<Object, Object>(null, -1L, 1);
+            CANCELLED = new SwitchMapInnerObserver<Object, Object>(null, -1L, 1);
             CANCELLED.cancel();
         }
-        
+
         volatile long unique;
-        
-        public SwitchMapSubscriber(Observer<? super R> actual, Function<? super T, ? extends ObservableConsumable<? extends R>> mapper, int bufferSize) {
-            this.actual = actual;
+
+        SwitchMapObserver(Observer<? super R> actual,
+                Function<? super T, ? extends ObservableSource<? extends R>> mapper, int bufferSize,
+                        boolean delayErrors) {
+            this.downstream = actual;
             this.mapper = mapper;
             this.bufferSize = bufferSize;
+            this.delayErrors = delayErrors;
+            this.errors = new AtomicThrowable();
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                actual.onSubscribe(this);
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.validate(this.upstream, d)) {
+                this.upstream = d;
+                downstream.onSubscribe(this);
             }
         }
-        
+
         @Override
         public void onNext(T t) {
             long c = unique + 1;
             unique = c;
-            
-            SwitchMapInnerSubscriber<T, R> inner = active.get();
+
+            SwitchMapInnerObserver<T, R> inner = active.get();
             if (inner != null) {
                 inner.cancel();
             }
-            
-            ObservableConsumable<? extends R> p;
+
+            ObservableSource<? extends R> p;
             try {
-                p = mapper.apply(t);
+                p = ObjectHelper.requireNonNull(mapper.apply(t), "The ObservableSource returned is null");
             } catch (Throwable e) {
-                s.dispose();
+                Exceptions.throwIfFatal(e);
+                upstream.dispose();
                 onError(e);
                 return;
             }
 
-            if (p == null) {
-                s.dispose();
-                onError(new NullPointerException("The publisher returned is null"));
-                return;
-            }
-            
-            SwitchMapInnerSubscriber<T, R> nextInner = new SwitchMapInnerSubscriber<T, R>(this, c, bufferSize);
-            
+            SwitchMapInnerObserver<T, R> nextInner = new SwitchMapInnerObserver<T, R>(this, c, bufferSize);
+
             for (;;) {
                 inner = active.get();
                 if (inner == CANCELLED) {
@@ -119,32 +129,33 @@ public final class ObservableSwitchMap<T, R> extends ObservableSource<T, R> {
                 }
             }
         }
-        
+
         @Override
         public void onError(Throwable t) {
-            if (done) {
+            if (!done && errors.addThrowable(t)) {
+                if (!delayErrors) {
+                    disposeInner();
+                }
+                done = true;
+                drain();
+            } else {
                 RxJavaPlugins.onError(t);
-                return;
             }
-            error = t;
-            done = true;
-            drain();
         }
-        
+
         @Override
         public void onComplete() {
-            if (done) {
-                return;
+            if (!done) {
+                done = true;
+                drain();
             }
-            done = true;
-            drain();
         }
-        
+
         @Override
         public void dispose() {
             if (!cancelled) {
                 cancelled = true;
-                
+                upstream.dispose();
                 disposeInner();
             }
         }
@@ -156,22 +167,24 @@ public final class ObservableSwitchMap<T, R> extends ObservableSource<T, R> {
 
         @SuppressWarnings("unchecked")
         void disposeInner() {
-            SwitchMapInnerSubscriber<T, R> a = active.get();
+            SwitchMapInnerObserver<T, R> a = active.get();
             if (a != CANCELLED) {
-                a = active.getAndSet((SwitchMapInnerSubscriber<T, R>)CANCELLED);
+                a = active.getAndSet((SwitchMapInnerObserver<T, R>)CANCELLED);
                 if (a != CANCELLED && a != null) {
-                    s.dispose();
+                    a.cancel();
                 }
             }
         }
-        
+
         void drain() {
             if (getAndIncrement() != 0) {
                 return;
             }
 
-            final Observer<? super R> a = actual;
-            
+            final Observer<? super R> a = downstream;
+            final AtomicReference<SwitchMapInnerObserver<T, R>> active = this.active;
+            final boolean delayErrors = this.delayErrors;
+
             int missing = 1;
 
             for (;;) {
@@ -179,150 +192,184 @@ public final class ObservableSwitchMap<T, R> extends ObservableSource<T, R> {
                 if (cancelled) {
                     return;
                 }
-                
+
                 if (done) {
-                    Throwable err = error;
-                    if (err != null) {
-                        disposeInner();
-                        s.dispose();
-                        a.onError(err);
-                        return;
-                    } else
-                    if (active.get() == null) {
-                        a.onComplete();
-                        return;
+                    boolean empty = active.get() == null;
+                    if (delayErrors) {
+                        if (empty) {
+                            Throwable ex = errors.get();
+                            if (ex != null) {
+                                a.onError(ex);
+                            } else {
+                                a.onComplete();
+                            }
+                            return;
+                        }
+                    } else {
+                        Throwable ex = errors.get();
+                        if (ex != null) {
+                            a.onError(errors.terminate());
+                            return;
+                        }
+                        if (empty) {
+                            a.onComplete();
+                            return;
+                        }
                     }
                 }
-                
-                SwitchMapInnerSubscriber<T, R> inner = active.get();
+
+                SwitchMapInnerObserver<T, R> inner = active.get();
 
                 if (inner != null) {
-                    Queue<R> q = inner.queue;
+                    SimpleQueue<R> q = inner.queue;
 
-                    if (inner.done) {
-                        Throwable err = inner.error;
-                        if (err != null) {
-                            s.dispose();
-                            disposeInner();
-                            a.onError(err);
-                            return;
-                        } else
-                        if (q.isEmpty()) {
-                            active.compareAndSet(inner, null);
-                            continue;
-                        }
-                    }
-                    
-                    boolean retry = false;
-                    
-                    for (;;) {
-                        if (cancelled) {
-                            return;
-                        }
-                        if (inner != active.get()) {
-                            retry = true;
-                            break;
+                    if (q != null) {
+                        if (inner.done) {
+                            boolean empty = q.isEmpty();
+                            if (delayErrors) {
+                                if (empty) {
+                                    active.compareAndSet(inner, null);
+                                    continue;
+                                }
+                            } else {
+                                Throwable ex = errors.get();
+                                if (ex != null) {
+                                    a.onError(errors.terminate());
+                                    return;
+                                }
+                                if (empty) {
+                                    active.compareAndSet(inner, null);
+                                    continue;
+                                }
+                            }
                         }
 
-                        boolean d = inner.done;
-                        R v = q.poll();
-                        boolean empty = v == null;
+                        boolean retry = false;
 
-                        if (d) {
-                            Throwable err = inner.error;
-                            if (err != null) {
-                                s.dispose();
-                                a.onError(err);
+                        for (;;) {
+                            if (cancelled) {
                                 return;
-                            } else
-                            if (empty) {
+                            }
+                            if (inner != active.get()) {
+                                retry = true;
+                                break;
+                            }
+
+                            if (!delayErrors) {
+                                Throwable ex = errors.get();
+                                if (ex != null) {
+                                    a.onError(errors.terminate());
+                                    return;
+                                }
+                            }
+
+                            boolean d = inner.done;
+                            R v;
+
+                            try {
+                                v = q.poll();
+                            } catch (Throwable ex) {
+                                Exceptions.throwIfFatal(ex);
+                                errors.addThrowable(ex);
+                                active.compareAndSet(inner, null);
+                                if (!delayErrors) {
+                                    disposeInner();
+                                    upstream.dispose();
+                                    done = true;
+                                } else {
+                                    inner.cancel();
+                                }
+                                v = null;
+                                retry = true;
+                            }
+                            boolean empty = v == null;
+
+                            if (d && empty) {
                                 active.compareAndSet(inner, null);
                                 retry = true;
                                 break;
                             }
+
+                            if (empty) {
+                                break;
+                            }
+
+                            a.onNext(v);
                         }
-                        
-                        if (empty) {
-                            break;
+
+                        if (retry) {
+                            continue;
                         }
-                        
-                        a.onNext(v);
-                    }
-                    
-                    if (retry) {
-                        continue;
                     }
                 }
-                
+
                 missing = addAndGet(-missing);
                 if (missing == 0) {
                     break;
                 }
             }
         }
-        
-        boolean checkTerminated(boolean d, boolean empty, Subscriber<? super R> a) {
-            if (cancelled) {
-                s.dispose();
-                return true;
-            }
-            if (d) {
-                Throwable e = error;
-                if (e != null) {
-                    cancelled = true;
-                    s.dispose();
-                    a.onError(e);
-                    return true;
-                } else
-                if (empty) {
-                    a.onComplete();
-                    return true;
+
+        void innerError(SwitchMapInnerObserver<T, R> inner, Throwable ex) {
+            if (inner.index == unique && errors.addThrowable(ex)) {
+                if (!delayErrors) {
+                    upstream.dispose();
                 }
+                inner.done = true;
+                drain();
+            } else {
+                RxJavaPlugins.onError(ex);
             }
-            
-            return false;
         }
     }
-    
-    static final class SwitchMapInnerSubscriber<T, R> extends AtomicReference<Disposable> implements Observer<R> {
-        /** */
-        private static final long serialVersionUID = 3837284832786408377L;
-        final SwitchMapSubscriber<T, R> parent;
-        final long index;
-        final int bufferSize;
-        final Queue<R> queue;
-        
-        volatile boolean done;
-        Throwable error;
 
-        public SwitchMapInnerSubscriber(SwitchMapSubscriber<T, R> parent, long index, int bufferSize) {
+    static final class SwitchMapInnerObserver<T, R> extends AtomicReference<Disposable> implements Observer<R> {
+
+        private static final long serialVersionUID = 3837284832786408377L;
+        final SwitchMapObserver<T, R> parent;
+        final long index;
+
+        final int bufferSize;
+
+        volatile SimpleQueue<R> queue;
+
+        volatile boolean done;
+
+        SwitchMapInnerObserver(SwitchMapObserver<T, R> parent, long index, int bufferSize) {
             this.parent = parent;
             this.index = index;
             this.bufferSize = bufferSize;
-            Queue<R> q;
-            if (Pow2.isPowerOfTwo(bufferSize)) {
-                q = new SpscArrayQueue<R>(bufferSize);
-            } else {
-                q = new SpscExactArrayQueue<R>(bufferSize);
-            }
-            this.queue = q;
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (index == parent.unique) {
-                DisposableHelper.setOnce(this, s);
-            } else {
-                s.dispose();
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.setOnce(this, d)) {
+                if (d instanceof QueueDisposable) {
+                    @SuppressWarnings("unchecked")
+                    QueueDisposable<R> qd = (QueueDisposable<R>) d;
+
+                    int m = qd.requestFusion(QueueDisposable.ANY | QueueDisposable.BOUNDARY);
+                    if (m == QueueDisposable.SYNC) {
+                        queue = qd;
+                        done = true;
+                        parent.drain();
+                        return;
+                    }
+                    if (m == QueueDisposable.ASYNC) {
+                        queue = qd;
+                        return;
+                    }
+                }
+
+                queue = new SpscLinkedArrayQueue<R>(bufferSize);
             }
         }
-        
+
         @Override
         public void onNext(R t) {
             if (index == parent.unique) {
-                if (!queue.offer(t)) {
-                    onError(new IllegalStateException("Queue full?!"));
-                    return;
+                if (t != null) {
+                    queue.offer(t);
                 }
                 parent.drain();
             }
@@ -330,15 +377,9 @@ public final class ObservableSwitchMap<T, R> extends ObservableSource<T, R> {
 
         @Override
         public void onError(Throwable t) {
-            if (index == parent.unique) {
-                error = t;
-                done = true;
-                parent.drain();
-            } else {
-                RxJavaPlugins.onError(t);
-            }
+            parent.innerError(this, t);
         }
-        
+
         @Override
         public void onComplete() {
             if (index == parent.unique) {
@@ -346,7 +387,7 @@ public final class ObservableSwitchMap<T, R> extends ObservableSource<T, R> {
                 parent.drain();
             }
         }
-        
+
         public void cancel() {
             DisposableHelper.dispose(this);
         }

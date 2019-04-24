@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -13,191 +13,238 @@
 
 package io.reactivex.internal.operators.observable;
 
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.*;
-import java.util.concurrent.locks.ReentrantLock;
 
 import io.reactivex.*;
-import io.reactivex.disposables.*;
+import io.reactivex.disposables.Disposable;
 import io.reactivex.functions.Consumer;
-import io.reactivex.internal.disposables.DisposableHelper;
+import io.reactivex.internal.disposables.*;
 import io.reactivex.observables.ConnectableObservable;
+import io.reactivex.plugins.RxJavaPlugins;
 
 /**
  * Returns an observable sequence that stays connected to the source as long as
  * there is at least one subscription to the observable sequence.
- * 
+ *
  * @param <T>
  *            the value type
  */
 public final class ObservableRefCount<T> extends Observable<T> {
 
-    final ConnectableObservable<? extends T> source;
-    
-    volatile CompositeDisposable baseSubscription = new CompositeDisposable();
-    
-    final AtomicInteger subscriptionCount = new AtomicInteger();
+    final ConnectableObservable<T> source;
 
-    /**
-     * Use this lock for every subscription and disconnect action.
-     */
-    final ReentrantLock lock = new ReentrantLock();
+    final int n;
 
-    /**
-     * Constructor.
-     * 
-     * @param source
-     *            observable to apply ref count to
-     */
-    public ObservableRefCount(ConnectableObservable<? extends T> source) {
+    final long timeout;
+
+    final TimeUnit unit;
+
+    final Scheduler scheduler;
+
+    RefConnection connection;
+
+    public ObservableRefCount(ConnectableObservable<T> source) {
+        this(source, 1, 0L, TimeUnit.NANOSECONDS, null);
+    }
+
+    public ObservableRefCount(ConnectableObservable<T> source, int n, long timeout, TimeUnit unit,
+            Scheduler scheduler) {
         this.source = source;
+        this.n = n;
+        this.timeout = timeout;
+        this.unit = unit;
+        this.scheduler = scheduler;
     }
 
     @Override
-    public void subscribeActual(final Observer<? super T> subscriber) {
+    protected void subscribeActual(Observer<? super T> observer) {
 
-        lock.lock();
-        if (subscriptionCount.incrementAndGet() == 1) {
+        RefConnection conn;
 
-            final AtomicBoolean writeLocked = new AtomicBoolean(true);
-
-            try {
-                // need to use this overload of connect to ensure that
-                // baseSubscription is set in the case that source is a
-                // synchronous Observable
-                source.connect(onSubscribe(subscriber, writeLocked));
-            } finally {
-                // need to cover the case where the source is subscribed to
-                // outside of this class thus preventing the Action1 passed
-                // to source.connect above being called
-                if (writeLocked.get()) {
-                    // Action1 passed to source.connect was not called
-                    lock.unlock();
-                }
+        boolean connect = false;
+        synchronized (this) {
+            conn = connection;
+            if (conn == null) {
+                conn = new RefConnection(this);
+                connection = conn;
             }
-        } else {
-            try {
-                // ready to subscribe to source so do it
-                doSubscribe(subscriber, baseSubscription);
-            } finally {
-                // release the read lock
-                lock.unlock();
+
+            long c = conn.subscriberCount;
+            if (c == 0L && conn.timer != null) {
+                conn.timer.dispose();
+            }
+            conn.subscriberCount = c + 1;
+            if (!conn.connected && c + 1 == n) {
+                connect = true;
+                conn.connected = true;
             }
         }
 
+        source.subscribe(new RefCountObserver<T>(observer, this, conn));
+
+        if (connect) {
+            source.connect(conn);
+        }
     }
 
-    private Consumer<Disposable> onSubscribe(final Observer<? super T> subscriber,
-            final AtomicBoolean writeLocked) {
-        return  new Consumer<Disposable>() {
-            @Override
-            public void accept(Disposable subscription) {
-                try {
-                    baseSubscription.add(subscription);
-                    // ready to subscribe to source so do it
-                    doSubscribe(subscriber, baseSubscription);
-                } finally {
-                    // release the write lock
-                    lock.unlock();
-                    writeLocked.set(false);
+    void cancel(RefConnection rc) {
+        SequentialDisposable sd;
+        synchronized (this) {
+            if (connection == null || connection != rc) {
+                return;
+            }
+            long c = rc.subscriberCount - 1;
+            rc.subscriberCount = c;
+            if (c != 0L || !rc.connected) {
+                return;
+            }
+            if (timeout == 0L) {
+                timeout(rc);
+                return;
+            }
+            sd = new SequentialDisposable();
+            rc.timer = sd;
+        }
+
+        sd.replace(scheduler.scheduleDirect(rc, timeout, unit));
+    }
+
+    void terminated(RefConnection rc) {
+        synchronized (this) {
+            if (connection != null && connection == rc) {
+                connection = null;
+                if (rc.timer != null) {
+                    rc.timer.dispose();
                 }
             }
-        };
-    }
-    
-    void doSubscribe(final Observer<? super T> subscriber, final CompositeDisposable currentBase) {
-        // handle unsubscribing from the base subscription
-        Disposable d = disconnect(currentBase);
-        
-        ConnectionSubscriber s = new ConnectionSubscriber(subscriber, currentBase, d);
-        
-        source.unsafeSubscribe(s);
+            if (--rc.subscriberCount == 0) {
+                if (source instanceof Disposable) {
+                    ((Disposable)source).dispose();
+                } else if (source instanceof ResettableConnectable) {
+                    ((ResettableConnectable)source).resetIf(rc.get());
+                }
+            }
+        }
     }
 
-    private Disposable disconnect(final CompositeDisposable current) {
-        return Disposables.from(new Runnable() {
-            @Override
-            public void run() {
-                lock.lock();
-                try {
-                    if (baseSubscription == current) {
-                        if (subscriptionCount.decrementAndGet() == 0) {
-                            baseSubscription.dispose();
-                            // need a new baseSubscription because once
-                            // unsubscribed stays that way
-                            baseSubscription = new CompositeDisposable();
-                        }
+    void timeout(RefConnection rc) {
+        synchronized (this) {
+            if (rc.subscriberCount == 0 && rc == connection) {
+                connection = null;
+                Disposable connectionObject = rc.get();
+                DisposableHelper.dispose(rc);
+
+                if (source instanceof Disposable) {
+                    ((Disposable)source).dispose();
+                } else if (source instanceof ResettableConnectable) {
+                    if (connectionObject == null) {
+                        rc.disconnectedEarly = true;
+                    } else {
+                        ((ResettableConnectable)source).resetIf(connectionObject);
                     }
-                } finally {
-                    lock.unlock();
                 }
             }
-        });
+        }
     }
 
-    final class ConnectionSubscriber implements Observer<T>, Disposable {
-        final Observer<? super T> subscriber;
-        final CompositeDisposable currentBase;
-        final Disposable resource;
+    static final class RefConnection extends AtomicReference<Disposable>
+    implements Runnable, Consumer<Disposable> {
 
-        Disposable s;
-        
-        ConnectionSubscriber(Observer<? super T> subscriber,
-                CompositeDisposable currentBase, Disposable resource) {
-            this.subscriber = subscriber;
-            this.currentBase = currentBase;
-            this.resource = resource;
+        private static final long serialVersionUID = -4552101107598366241L;
+
+        final ObservableRefCount<?> parent;
+
+        Disposable timer;
+
+        long subscriberCount;
+
+        boolean connected;
+
+        boolean disconnectedEarly;
+
+        RefConnection(ObservableRefCount<?> parent) {
+            this.parent = parent;
         }
 
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                subscriber.onSubscribe(this);
+        public void run() {
+            parent.timeout(this);
+        }
+
+        @Override
+        public void accept(Disposable t) throws Exception {
+            DisposableHelper.replace(this, t);
+            synchronized (parent) {
+                if (disconnectedEarly) {
+                    ((ResettableConnectable)parent.source).resetIf(t);
+                }
             }
         }
+    }
 
-        @Override
-        public void onError(Throwable e) {
-            cleanup();
-            subscriber.onError(e);
+    static final class RefCountObserver<T>
+    extends AtomicBoolean implements Observer<T>, Disposable {
+
+        private static final long serialVersionUID = -7419642935409022375L;
+
+        final Observer<? super T> downstream;
+
+        final ObservableRefCount<T> parent;
+
+        final RefConnection connection;
+
+        Disposable upstream;
+
+        RefCountObserver(Observer<? super T> downstream, ObservableRefCount<T> parent, RefConnection connection) {
+            this.downstream = downstream;
+            this.parent = parent;
+            this.connection = connection;
         }
 
         @Override
         public void onNext(T t) {
-            subscriber.onNext(t);
+            downstream.onNext(t);
+        }
+
+        @Override
+        public void onError(Throwable t) {
+            if (compareAndSet(false, true)) {
+                parent.terminated(connection);
+                downstream.onError(t);
+            } else {
+                RxJavaPlugins.onError(t);
+            }
         }
 
         @Override
         public void onComplete() {
-            cleanup();
-            subscriber.onComplete();
+            if (compareAndSet(false, true)) {
+                parent.terminated(connection);
+                downstream.onComplete();
+            }
         }
-        
+
         @Override
         public void dispose() {
-            s.dispose();
-            resource.dispose();
+            upstream.dispose();
+            if (compareAndSet(false, true)) {
+                parent.cancel(connection);
+            }
         }
 
         @Override
         public boolean isDisposed() {
-            return s.isDisposed();
+            return upstream.isDisposed();
         }
 
-        void cleanup() {
-            // on error or completion we need to unsubscribe the base subscription
-            // and set the subscriptionCount to 0 
-            lock.lock();
-            try {
-                if (baseSubscription == currentBase) {
-                    baseSubscription.dispose();
-                    baseSubscription = new CompositeDisposable();
-                    subscriptionCount.set(0);
-                }
-            } finally {
-                lock.unlock();
+        @Override
+        public void onSubscribe(Disposable d) {
+            if (DisposableHelper.validate(upstream, d)) {
+                this.upstream = d;
+
+                downstream.onSubscribe(this);
             }
         }
     }
-
 }

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -19,84 +19,81 @@ import io.reactivex.*;
 import io.reactivex.disposables.Disposable;
 import io.reactivex.internal.disposables.DisposableHelper;
 
-public final class ObservableSubscribeOn<T> extends Observable<T> {
-    final Observable<? extends T> source;
+public final class ObservableSubscribeOn<T> extends AbstractObservableWithUpstream<T, T> {
     final Scheduler scheduler;
-    
-    public ObservableSubscribeOn(Observable<? extends T> source, Scheduler scheduler) {
-        this.source = source;
+
+    public ObservableSubscribeOn(ObservableSource<T> source, Scheduler scheduler) {
+        super(source);
         this.scheduler = scheduler;
     }
-    
+
     @Override
-    public void subscribeActual(final Observer<? super T> s) {
-        /*
-         * TODO can't use the returned disposable because to dispose it,
-         * one must set a Subscription on s on the current thread, but
-         * it is expected that onSubscribe is run on the target scheduler.
-         */
-        scheduler.scheduleDirect(new Runnable() {
-            @Override
-            public void run() {
-                source.subscribe(s);
-            }
-        });
+    public void subscribeActual(final Observer<? super T> observer) {
+        final SubscribeOnObserver<T> parent = new SubscribeOnObserver<T>(observer);
+
+        observer.onSubscribe(parent);
+
+        parent.setDisposable(scheduler.scheduleDirect(new SubscribeTask(parent)));
     }
-    
-    static final class SubscribeOnSubscriber<T> extends AtomicReference<Thread> implements Observer<T>, Disposable {
-        /** */
+
+    static final class SubscribeOnObserver<T> extends AtomicReference<Disposable> implements Observer<T>, Disposable {
+
         private static final long serialVersionUID = 8094547886072529208L;
-        final Observer<? super T> actual;
-        final Scheduler.Worker worker;
-        
-        Disposable s;
-        
-        public SubscribeOnSubscriber(Observer<? super T> actual, Scheduler.Worker worker) {
-            this.actual = actual;
-            this.worker = worker;
+        final Observer<? super T> downstream;
+
+        final AtomicReference<Disposable> upstream;
+
+        SubscribeOnObserver(Observer<? super T> downstream) {
+            this.downstream = downstream;
+            this.upstream = new AtomicReference<Disposable>();
         }
-        
+
         @Override
-        public void onSubscribe(Disposable s) {
-            if (DisposableHelper.validate(this.s, s)) {
-                this.s = s;
-                lazySet(Thread.currentThread());
-                actual.onSubscribe(this);
-            }
+        public void onSubscribe(Disposable d) {
+            DisposableHelper.setOnce(this.upstream, d);
         }
-        
+
         @Override
         public void onNext(T t) {
-            actual.onNext(t);
+            downstream.onNext(t);
         }
-        
+
         @Override
         public void onError(Throwable t) {
-            try {
-                actual.onError(t);
-            } finally {
-                worker.dispose();
-            }
+            downstream.onError(t);
         }
-        
+
         @Override
         public void onComplete() {
-            try {
-                actual.onComplete();
-            } finally {
-                worker.dispose();
-            }
+            downstream.onComplete();
         }
-        
+
         @Override
         public void dispose() {
-            s.dispose();
-            worker.dispose();
+            DisposableHelper.dispose(upstream);
+            DisposableHelper.dispose(this);
         }
 
         @Override
         public boolean isDisposed() {
-            return s.isDisposed();
+            return DisposableHelper.isDisposed(get());
+        }
+
+        void setDisposable(Disposable d) {
+            DisposableHelper.setOnce(this, d);
+        }
+    }
+
+    final class SubscribeTask implements Runnable {
+        private final SubscribeOnObserver<T> parent;
+
+        SubscribeTask(SubscribeOnObserver<T> parent) {
+            this.parent = parent;
+        }
+
+        @Override
+        public void run() {
+            source.subscribe(parent);
         }
     }
 }

@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -23,9 +23,8 @@ import org.junit.Test;
 import io.reactivex.*;
 import io.reactivex.Observable;
 import io.reactivex.Observer;
-import io.reactivex.Optional;
-import io.reactivex.functions.Consumer;
-import io.reactivex.internal.disposables.EmptyDisposable;
+import io.reactivex.disposables.Disposables;
+import io.reactivex.functions.*;
 import io.reactivex.observers.*;
 
 public class ObservableMaterializeTest {
@@ -37,9 +36,9 @@ public class ObservableMaterializeTest {
         final TestAsyncErrorObservable o1 = new TestAsyncErrorObservable("one", "two", null,
                 "three");
 
-        TestLocalObserver NbpObserver = new TestLocalObserver();
-        Observable<Try<Optional<String>>> m = Observable.create(o1).materialize();
-        m.subscribe(NbpObserver);
+        TestLocalObserver observer = new TestLocalObserver();
+        Observable<Notification<String>> m = Observable.unsafeCreate(o1).materialize();
+        m.subscribe(observer);
 
         try {
             o1.t.join();
@@ -47,24 +46,27 @@ public class ObservableMaterializeTest {
             throw new RuntimeException(e);
         }
 
-        assertFalse(NbpObserver.onError);
-        assertTrue(NbpObserver.onCompleted);
-        assertEquals(3, NbpObserver.notifications.size());
-        assertEquals("one", NbpObserver.notifications.get(0).value().get());
-        assertTrue(Notification.isNext(NbpObserver.notifications.get(0)));
-        assertEquals("two", Notification.getValue(NbpObserver.notifications.get(1)));
-        assertTrue(Notification.isNext(NbpObserver.notifications.get(1)));
-        assertEquals(NullPointerException.class, NbpObserver.notifications.get(2).error().getClass());
-        assertTrue(Notification.isError(NbpObserver.notifications.get(2)));
+        assertFalse(observer.onError);
+        assertTrue(observer.onComplete);
+        assertEquals(3, observer.notifications.size());
+
+        assertTrue(observer.notifications.get(0).isOnNext());
+        assertEquals("one", observer.notifications.get(0).getValue());
+
+        assertTrue(observer.notifications.get(1).isOnNext());
+        assertEquals("two", observer.notifications.get(1).getValue());
+
+        assertTrue(observer.notifications.get(2).isOnError());
+        assertEquals(NullPointerException.class, observer.notifications.get(2).getError().getClass());
     }
 
     @Test
     public void testMaterialize2() {
         final TestAsyncErrorObservable o1 = new TestAsyncErrorObservable("one", "two", "three");
 
-        TestLocalObserver NbpObserver = new TestLocalObserver();
-        Observable<Try<Optional<String>>> m = Observable.create(o1).materialize();
-        m.subscribe(NbpObserver);
+        TestLocalObserver observer = new TestLocalObserver();
+        Observable<Notification<String>> m = Observable.unsafeCreate(o1).materialize();
+        m.subscribe(observer);
 
         try {
             o1.t.join();
@@ -72,52 +74,55 @@ public class ObservableMaterializeTest {
             throw new RuntimeException(e);
         }
 
-        assertFalse(NbpObserver.onError);
-        assertTrue(NbpObserver.onCompleted);
-        assertEquals(4, NbpObserver.notifications.size());
-        assertEquals("one", Notification.getValue(NbpObserver.notifications.get(0)));
-        assertTrue(Notification.isNext(NbpObserver.notifications.get(0)));
-        assertEquals("two", Notification.getValue(NbpObserver.notifications.get(1)));
-        assertTrue(Notification.isNext(NbpObserver.notifications.get(1)));
-        assertEquals("three", Notification.getValue(NbpObserver.notifications.get(2)));
-        assertTrue(Notification.isNext(NbpObserver.notifications.get(2)));
-        assertTrue(Notification.isComplete(NbpObserver.notifications.get(3)));
+        assertFalse(observer.onError);
+        assertTrue(observer.onComplete);
+        assertEquals(4, observer.notifications.size());
+        assertTrue(observer.notifications.get(0).isOnNext());
+        assertEquals("one", observer.notifications.get(0).getValue());
+
+        assertTrue(observer.notifications.get(1).isOnNext());
+        assertEquals("two", observer.notifications.get(1).getValue());
+
+        assertTrue(observer.notifications.get(2).isOnNext());
+        assertEquals("three", observer.notifications.get(2).getValue());
+
+        assertTrue(observer.notifications.get(3).isOnComplete());
     }
 
     @Test
     public void testMultipleSubscribes() throws InterruptedException, ExecutionException {
         final TestAsyncErrorObservable o = new TestAsyncErrorObservable("one", "two", null, "three");
 
-        Observable<Try<Optional<String>>> m = Observable.create(o).materialize();
+        Observable<Notification<String>> m = Observable.unsafeCreate(o).materialize();
 
-        assertEquals(3, m.toList().toBlocking().toFuture().get().size());
-        assertEquals(3, m.toList().toBlocking().toFuture().get().size());
+        assertEquals(3, m.toList().toFuture().get().size());
+        assertEquals(3, m.toList().toFuture().get().size());
     }
 
     @Test
     public void testWithCompletionCausingError() {
-        TestObserver<Try<Optional<Integer>>> ts = new TestObserver<Try<Optional<Integer>>>();
+        TestObserver<Notification<Integer>> to = new TestObserver<Notification<Integer>>();
         final RuntimeException ex = new RuntimeException("boo");
         Observable.<Integer>empty().materialize().doOnNext(new Consumer<Object>() {
             @Override
             public void accept(Object t) {
                 throw ex;
             }
-        }).subscribe(ts);
-        ts.assertError(ex);
-        ts.assertNoValues();
-        ts.assertTerminated();
+        }).subscribe(to);
+        to.assertError(ex);
+        to.assertNoValues();
+        to.assertTerminated();
     }
-    
-    private static class TestLocalObserver extends DefaultObserver<Try<Optional<String>>> {
 
-        boolean onCompleted = false;
-        boolean onError = false;
-        List<Try<Optional<String>>> notifications = new Vector<Try<Optional<String>>>();
+    private static class TestLocalObserver extends DefaultObserver<Notification<String>> {
+
+        boolean onComplete;
+        boolean onError;
+        List<Notification<String>> notifications = new Vector<Notification<String>>();
 
         @Override
         public void onComplete() {
-            this.onCompleted = true;
+            this.onComplete = true;
         }
 
         @Override
@@ -126,13 +131,13 @@ public class ObservableMaterializeTest {
         }
 
         @Override
-        public void onNext(Try<Optional<String>> value) {
+        public void onNext(Notification<String> value) {
             this.notifications.add(value);
         }
 
     }
 
-    private static class TestAsyncErrorObservable implements ObservableConsumable<String> {
+    private static class TestAsyncErrorObservable implements ObservableSource<String> {
 
         String[] valuesToReturn;
 
@@ -143,8 +148,8 @@ public class ObservableMaterializeTest {
         volatile Thread t;
 
         @Override
-        public void subscribe(final Observer<? super String> NbpObserver) {
-            NbpObserver.onSubscribe(EmptyDisposable.INSTANCE);
+        public void subscribe(final Observer<? super String> observer) {
+            observer.onSubscribe(Disposables.empty());
             t = new Thread(new Runnable() {
 
                 @Override
@@ -157,18 +162,33 @@ public class ObservableMaterializeTest {
                             } catch (Throwable e) {
 
                             }
-                            NbpObserver.onError(new NullPointerException());
+                            observer.onError(new NullPointerException());
                             return;
                         } else {
-                            NbpObserver.onNext(s);
+                            observer.onNext(s);
                         }
                     }
                     System.out.println("subscription complete");
-                    NbpObserver.onComplete();
+                    observer.onComplete();
                 }
 
             });
             t.start();
         }
+    }
+
+    @Test
+    public void dispose() {
+        TestHelper.checkDisposed(Observable.just(1).materialize());
+    }
+
+    @Test
+    public void doubleOnSubscribe() {
+        TestHelper.checkDoubleOnSubscribeObservable(new Function<Observable<Object>, ObservableSource<Notification<Object>>>() {
+            @Override
+            public ObservableSource<Notification<Object>> apply(Observable<Object> o) throws Exception {
+                return o.materialize();
+            }
+        });
     }
 }

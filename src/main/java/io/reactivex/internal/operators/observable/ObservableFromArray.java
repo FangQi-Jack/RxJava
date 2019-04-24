@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -14,44 +14,43 @@
 package io.reactivex.internal.operators.observable;
 
 import io.reactivex.*;
-import io.reactivex.internal.functions.Objects;
-import io.reactivex.internal.subscribers.observable.BaseQueueDisposable;
+import io.reactivex.annotations.Nullable;
+import io.reactivex.internal.functions.ObjectHelper;
+import io.reactivex.internal.observers.BasicQueueDisposable;
 
 public final class ObservableFromArray<T> extends Observable<T> {
     final T[] array;
     public ObservableFromArray(T[] array) {
         this.array = array;
     }
-    public T[] array() {
-        return array; // NOPMD
-    }
+
     @Override
-    public void subscribeActual(Observer<? super T> s) {
-        FromArrayDisposable<T> d = new FromArrayDisposable<T>(s, array);
-        
-        s.onSubscribe(d);
-        
+    public void subscribeActual(Observer<? super T> observer) {
+        FromArrayDisposable<T> d = new FromArrayDisposable<T>(observer, array);
+
+        observer.onSubscribe(d);
+
         if (d.fusionMode) {
             return;
         }
-        
+
         d.run();
     }
-    
-    static final class FromArrayDisposable<T> extends BaseQueueDisposable<T> {
 
-        final Observer<? super T> actual;
-        
+    static final class FromArrayDisposable<T> extends BasicQueueDisposable<T> {
+
+        final Observer<? super T> downstream;
+
         final T[] array;
-        
+
         int index;
-        
+
         boolean fusionMode;
-        
+
         volatile boolean disposed;
 
-        public FromArrayDisposable(Observer<? super T> actual, T[] array) {
-            this.actual = actual;
+        FromArrayDisposable(Observer<? super T> actual, T[] array) {
+            this.downstream = actual;
             this.array = array;
         }
 
@@ -64,13 +63,14 @@ public final class ObservableFromArray<T> extends Observable<T> {
             return NONE;
         }
 
+        @Nullable
         @Override
         public T poll() {
             int i = index;
             T[] a = array;
             if (i != a.length) {
                 index = i + 1;
-                return Objects.requireNonNull(a[i], "The array element is null");
+                return ObjectHelper.requireNonNull(a[i], "The array element is null");
             }
             return null;
         }
@@ -94,21 +94,21 @@ public final class ObservableFromArray<T> extends Observable<T> {
         public boolean isDisposed() {
             return disposed;
         }
-        
+
         void run() {
             T[] a = array;
             int n = a.length;
-            
+
             for (int i = 0; i < n && !isDisposed(); i++) {
                 T value = a[i];
                 if (value == null) {
-                    actual.onError(new NullPointerException("The " + i + "th element is null"));
+                    downstream.onError(new NullPointerException("The element at index " + i + " is null"));
                     return;
                 }
-                actual.onNext(value);
+                downstream.onNext(value);
             }
             if (!isDisposed()) {
-                actual.onComplete();
+                downstream.onComplete();
             }
         }
     }

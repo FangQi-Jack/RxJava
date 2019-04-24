@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -14,85 +14,107 @@
 package io.reactivex.internal.operators.single;
 
 import io.reactivex.*;
-import io.reactivex.disposables.*;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.exceptions.Exceptions;
 import io.reactivex.functions.Function;
+import io.reactivex.internal.disposables.DisposableHelper;
+import io.reactivex.internal.functions.ObjectHelper;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class SingleFlatMap<T, R> extends Single<R> {
-    final SingleConsumable<? extends T> source;
-    
-    final Function<? super T, ? extends SingleConsumable<? extends R>> mapper;
+    final SingleSource<? extends T> source;
 
-    public SingleFlatMap(SingleConsumable<? extends T> source, Function<? super T, ? extends SingleConsumable<? extends R>> mapper) {
+    final Function<? super T, ? extends SingleSource<? extends R>> mapper;
+
+    public SingleFlatMap(SingleSource<? extends T> source, Function<? super T, ? extends SingleSource<? extends R>> mapper) {
         this.mapper = mapper;
         this.source = source;
     }
-    
-    @Override
-    protected void subscribeActual(SingleSubscriber<? super R> subscriber) {
-        SingleFlatMapCallback<T, R> parent = new SingleFlatMapCallback<T, R>(subscriber, mapper);
-        subscriber.onSubscribe(parent.sd);
-        source.subscribe(parent);
-    }
-    
-    static final class SingleFlatMapCallback<T, R> implements SingleSubscriber<T> {
-        final SingleSubscriber<? super R> actual;
-        final Function<? super T, ? extends SingleConsumable<? extends R>> mapper;
-        
-        final SerialDisposable sd;
 
-        public SingleFlatMapCallback(SingleSubscriber<? super R> actual,
-                Function<? super T, ? extends SingleConsumable<? extends R>> mapper) {
-            this.actual = actual;
+    @Override
+    protected void subscribeActual(SingleObserver<? super R> downstream) {
+        source.subscribe(new SingleFlatMapCallback<T, R>(downstream, mapper));
+    }
+
+    static final class SingleFlatMapCallback<T, R>
+    extends AtomicReference<Disposable>
+    implements SingleObserver<T>, Disposable {
+        private static final long serialVersionUID = 3258103020495908596L;
+
+        final SingleObserver<? super R> downstream;
+
+        final Function<? super T, ? extends SingleSource<? extends R>> mapper;
+
+        SingleFlatMapCallback(SingleObserver<? super R> actual,
+                Function<? super T, ? extends SingleSource<? extends R>> mapper) {
+            this.downstream = actual;
             this.mapper = mapper;
-            this.sd = new SerialDisposable();
         }
-        
+
+        @Override
+        public void dispose() {
+            DisposableHelper.dispose(this);
+        }
+
+        @Override
+        public boolean isDisposed() {
+            return DisposableHelper.isDisposed(get());
+        }
+
         @Override
         public void onSubscribe(Disposable d) {
-            sd.replace(d);
+            if (DisposableHelper.setOnce(this, d)) {
+                downstream.onSubscribe(this);
+            }
         }
-        
+
         @Override
         public void onSuccess(T value) {
-            SingleConsumable<? extends R> o;
-            
+            SingleSource<? extends R> o;
+
             try {
-                o = mapper.apply(value);
+                o = ObjectHelper.requireNonNull(mapper.apply(value), "The single returned by the mapper is null");
             } catch (Throwable e) {
-                actual.onError(e);
+                Exceptions.throwIfFatal(e);
+                downstream.onError(e);
                 return;
             }
-            
-            if (o == null) {
-                actual.onError(new NullPointerException("The single returned by the mapper is null"));
-                return;
+
+            if (!isDisposed()) {
+                o.subscribe(new FlatMapSingleObserver<R>(this, downstream));
             }
-            
-            if (sd.isDisposed()) {
-                return;
-            }
-            
-            o.subscribe(new SingleSubscriber<R>() {
-                @Override
-                public void onSubscribe(Disposable d) {
-                    sd.replace(d);
-                }
-                
-                @Override
-                public void onSuccess(R value) {
-                    actual.onSuccess(value);
-                }
-                
-                @Override
-                public void onError(Throwable e) {
-                    actual.onError(e);
-                }
-            });
         }
-        
+
         @Override
         public void onError(Throwable e) {
-            actual.onError(e);
+            downstream.onError(e);
+        }
+
+        static final class FlatMapSingleObserver<R> implements SingleObserver<R> {
+
+            final AtomicReference<Disposable> parent;
+
+            final SingleObserver<? super R> downstream;
+
+            FlatMapSingleObserver(AtomicReference<Disposable> parent, SingleObserver<? super R> downstream) {
+                this.parent = parent;
+                this.downstream = downstream;
+            }
+
+            @Override
+            public void onSubscribe(final Disposable d) {
+                DisposableHelper.replace(parent, d);
+            }
+
+            @Override
+            public void onSuccess(final R value) {
+                downstream.onSuccess(value);
+            }
+
+            @Override
+            public void onError(final Throwable e) {
+                downstream.onError(e);
+            }
         }
     }
 }

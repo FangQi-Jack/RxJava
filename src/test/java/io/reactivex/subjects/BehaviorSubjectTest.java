@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -14,9 +14,10 @@
 package io.reactivex.subjects;
 
 import static org.junit.Assert.*;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
+import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -24,14 +25,22 @@ import org.junit.*;
 import org.mockito.*;
 
 import io.reactivex.*;
+import io.reactivex.disposables.*;
 import io.reactivex.exceptions.TestException;
 import io.reactivex.functions.Function;
 import io.reactivex.observers.*;
+import io.reactivex.plugins.RxJavaPlugins;
 import io.reactivex.schedulers.Schedulers;
+import io.reactivex.subjects.BehaviorSubject.BehaviorDisposable;
 
-public class BehaviorSubjectTest {
+public class BehaviorSubjectTest extends SubjectTest<Integer> {
 
     private final Throwable testException = new Throwable();
+
+    @Override
+    protected Subject<Integer> create() {
+        return BehaviorSubject.create();
+    }
 
     @Test
     public void testThatSubscriberReceivesDefaultValueAndSubsequentEvents() {
@@ -126,9 +135,9 @@ public class BehaviorSubjectTest {
         Observer<Object> observerB = TestHelper.mockObserver();
         Observer<Object> observerC = TestHelper.mockObserver();
 
-        TestObserver<Object> ts = new TestObserver<Object>(observerA);
-        
-        channel.subscribe(ts);
+        TestObserver<Object> to = new TestObserver<Object>(observerA);
+
+        channel.subscribe(to);
         channel.subscribe(observerB);
 
         InOrder inOrderA = inOrder(observerA);
@@ -143,7 +152,7 @@ public class BehaviorSubjectTest {
         inOrderA.verify(observerA).onNext(42);
         inOrderB.verify(observerB).onNext(42);
 
-        ts.dispose();
+        to.dispose();
         inOrderA.verifyNoMoreInteractions();
 
         channel.onNext(4711);
@@ -232,18 +241,19 @@ public class BehaviorSubjectTest {
         verify(o2, never()).onNext(any());
         verify(observer, never()).onError(any(Throwable.class));
     }
-    
+
     @Test(timeout = 1000)
     public void testUnsubscriptionCase() {
         BehaviorSubject<String> src = BehaviorSubject.createDefault("null"); // FIXME was plain null which is not allowed
-        
+
         for (int i = 0; i < 10; i++) {
             final Observer<Object> o = TestHelper.mockObserver();
             InOrder inOrder = inOrder(o);
             String v = "" + i;
             src.onNext(v);
             System.out.printf("Turn: %d%n", i);
-            src.first()
+            src.firstElement()
+                .toObservable()
                 .flatMap(new Function<String, Observable<String>>() {
 
                     @Override
@@ -272,31 +282,31 @@ public class BehaviorSubjectTest {
             verify(o, never()).onError(any(Throwable.class));
         }
     }
+
     @Test
     public void testStartEmpty() {
         BehaviorSubject<Integer> source = BehaviorSubject.create();
         final Observer<Object> o = TestHelper.mockObserver();
         InOrder inOrder = inOrder(o);
-        
+
         source.subscribe(o);
-        
+
         inOrder.verify(o, never()).onNext(any());
         inOrder.verify(o, never()).onComplete();
-        
+
         source.onNext(1);
-        
+
         source.onComplete();
-        
+
         source.onNext(2);
-        
+
         verify(o, never()).onError(any(Throwable.class));
 
         inOrder.verify(o).onNext(1);
         inOrder.verify(o).onComplete();
         inOrder.verifyNoMoreInteractions();
-        
-        
     }
+
     @Test
     public void testStartEmptyThenAddOne() {
         BehaviorSubject<Integer> source = BehaviorSubject.create();
@@ -315,10 +325,11 @@ public class BehaviorSubjectTest {
 
         inOrder.verify(o).onComplete();
         inOrder.verifyNoMoreInteractions();
-        
+
         verify(o, never()).onError(any(Throwable.class));
-        
+
     }
+
     @Test
     public void testStartEmptyCompleteWithOne() {
         BehaviorSubject<Integer> source = BehaviorSubject.create();
@@ -335,30 +346,30 @@ public class BehaviorSubjectTest {
         verify(o, never()).onError(any(Throwable.class));
         verify(o, never()).onNext(any());
     }
-    
+
     @Test
     public void testTakeOneSubscriber() {
         BehaviorSubject<Integer> source = BehaviorSubject.createDefault(1);
         final Observer<Object> o = TestHelper.mockObserver();
-        
+
         source.take(1).subscribe(o);
-        
+
         verify(o).onNext(1);
         verify(o).onComplete();
         verify(o, never()).onError(any(Throwable.class));
-        
+
         assertEquals(0, source.subscriberCount());
-        assertFalse(source.hasSubscribers());
+        assertFalse(source.hasObservers());
     }
-    
+
     // FIXME RS subscribers are not allowed to throw
 //    @Test
 //    public void testOnErrorThrowsDoesntPreventDelivery() {
-//        NbpBehaviorSubject<String> ps = NbpBehaviorSubject.create();
+//        BehaviorSubject<String> ps = BehaviorSubject.create();
 //
 //        ps.subscribe();
-//        TestNbpSubscriber<String> ts = new TestNbpSubscriber<T>();
-//        ps.subscribe(ts);
+//        TestObserver<String> to = new TestObserver<T>();
+//        ps.subscribe(to);
 //
 //        try {
 //            ps.onError(new RuntimeException("an exception"));
@@ -366,22 +377,22 @@ public class BehaviorSubjectTest {
 //        } catch (OnErrorNotImplementedException e) {
 //            // ignore
 //        }
-//        // even though the onError above throws we should still receive it on the other subscriber 
-//        assertEquals(1, ts.getOnErrorEvents().size());
+//        // even though the onError above throws we should still receive it on the other subscriber
+//        assertEquals(1, to.getOnErrorEvents().size());
 //    }
-    
+
     // FIXME RS subscribers are not allowed to throw
 //    /**
 //     * This one has multiple failures so should get a CompositeException
 //     */
 //    @Test
 //    public void testOnErrorThrowsDoesntPreventDelivery2() {
-//        NbpBehaviorSubject<String> ps = NbpBehaviorSubject.create();
+//        BehaviorSubject<String> ps = BehaviorSubject.create();
 //
 //        ps.subscribe();
 //        ps.subscribe();
-//        TestNbpSubscriber<String> ts = new TestNbpSubscriber<String>();
-//        ps.subscribe(ts);
+//        TestObserver<String> to = new TestObserver<String>();
+//        ps.subscribe(to);
 //        ps.subscribe();
 //        ps.subscribe();
 //        ps.subscribe();
@@ -393,9 +404,10 @@ public class BehaviorSubjectTest {
 //            // we should have 5 of them
 //            assertEquals(5, e.getExceptions().size());
 //        }
-//        // even though the onError above throws we should still receive it on the other subscriber 
-//        assertEquals(1, ts.getOnErrorEvents().size());
+//        // even though the onError above throws we should still receive it on the other subscriber
+//        assertEquals(1, to.getOnErrorEvents().size());
 //    }
+
     @Test
     public void testEmissionSubscriptionRace() throws Exception {
         Scheduler s = Schedulers.io();
@@ -406,10 +418,10 @@ public class BehaviorSubjectTest {
                     System.out.println(i);
                 }
                 final BehaviorSubject<Object> rs = BehaviorSubject.create();
-                
-                final CountDownLatch finish = new CountDownLatch(1); 
-                final CountDownLatch start = new CountDownLatch(1); 
-                
+
+                final CountDownLatch finish = new CountDownLatch(1);
+                final CountDownLatch start = new CountDownLatch(1);
+
                 worker.schedule(new Runnable() {
                     @Override
                     public void run() {
@@ -421,36 +433,36 @@ public class BehaviorSubjectTest {
                         rs.onNext(1);
                     }
                 });
-                
+
                 final AtomicReference<Object> o = new AtomicReference<Object>();
-                
+
                 rs.subscribeOn(s).observeOn(Schedulers.io())
                 .subscribe(new DefaultObserver<Object>() {
-    
+
                     @Override
                     public void onComplete() {
                         o.set(-1);
                         finish.countDown();
                     }
-    
+
                     @Override
                     public void onError(Throwable e) {
                         o.set(e);
                         finish.countDown();
                     }
-    
+
                     @Override
                     public void onNext(Object t) {
                         o.set(t);
                         finish.countDown();
                     }
-                    
+
                 });
                 start.countDown();
-                
+
                 if (!finish.await(5, TimeUnit.SECONDS)) {
                     System.out.println(o.get());
-                    System.out.println(rs.hasSubscribers());
+                    System.out.println(rs.hasObservers());
                     rs.onComplete();
                     Assert.fail("Timeout @ " + i);
                     break;
@@ -468,52 +480,52 @@ public class BehaviorSubjectTest {
             worker.dispose();
         }
     }
-    
+
     @Test
     public void testCurrentStateMethodsNormalEmptyStart() {
         BehaviorSubject<Object> as = BehaviorSubject.create();
-        
+
         assertFalse(as.hasValue());
         assertFalse(as.hasThrowable());
         assertFalse(as.hasComplete());
         assertNull(as.getValue());
         assertNull(as.getThrowable());
-        
+
         as.onNext(1);
-        
+
         assertTrue(as.hasValue());
         assertFalse(as.hasThrowable());
         assertFalse(as.hasComplete());
         assertEquals(1, as.getValue());
         assertNull(as.getThrowable());
-        
+
         as.onComplete();
-        
+
         assertFalse(as.hasValue());
         assertFalse(as.hasThrowable());
         assertTrue(as.hasComplete());
         assertNull(as.getValue());
         assertNull(as.getThrowable());
     }
-    
+
     @Test
     public void testCurrentStateMethodsNormalSomeStart() {
         BehaviorSubject<Object> as = BehaviorSubject.createDefault((Object)1);
-        
+
         assertTrue(as.hasValue());
         assertFalse(as.hasThrowable());
         assertFalse(as.hasComplete());
         assertEquals(1, as.getValue());
         assertNull(as.getThrowable());
-        
+
         as.onNext(2);
-        
+
         assertTrue(as.hasValue());
         assertFalse(as.hasThrowable());
         assertFalse(as.hasComplete());
         assertEquals(2, as.getValue());
         assertNull(as.getThrowable());
-        
+
         as.onComplete();
         assertFalse(as.hasValue());
         assertFalse(as.hasThrowable());
@@ -521,41 +533,349 @@ public class BehaviorSubjectTest {
         assertNull(as.getValue());
         assertNull(as.getThrowable());
     }
-    
+
     @Test
     public void testCurrentStateMethodsEmpty() {
         BehaviorSubject<Object> as = BehaviorSubject.create();
-        
+
         assertFalse(as.hasValue());
         assertFalse(as.hasThrowable());
         assertFalse(as.hasComplete());
         assertNull(as.getValue());
         assertNull(as.getThrowable());
-        
+
         as.onComplete();
-        
+
         assertFalse(as.hasValue());
         assertFalse(as.hasThrowable());
         assertTrue(as.hasComplete());
         assertNull(as.getValue());
         assertNull(as.getThrowable());
     }
+
     @Test
     public void testCurrentStateMethodsError() {
         BehaviorSubject<Object> as = BehaviorSubject.create();
-        
+
         assertFalse(as.hasValue());
         assertFalse(as.hasThrowable());
         assertFalse(as.hasComplete());
         assertNull(as.getValue());
         assertNull(as.getThrowable());
-        
+
         as.onError(new TestException());
-        
+
         assertFalse(as.hasValue());
         assertTrue(as.hasThrowable());
         assertFalse(as.hasComplete());
         assertNull(as.getValue());
         assertTrue(as.getThrowable() instanceof TestException);
+    }
+
+    @Test
+    public void cancelOnArrival() {
+        BehaviorSubject<Object> p = BehaviorSubject.create();
+
+        assertFalse(p.hasObservers());
+
+        p.test(true).assertEmpty();
+
+        assertFalse(p.hasObservers());
+    }
+
+    @Test
+    public void onSubscribe() {
+        BehaviorSubject<Object> p = BehaviorSubject.create();
+
+        Disposable bs = Disposables.empty();
+
+        p.onSubscribe(bs);
+
+        assertFalse(bs.isDisposed());
+
+        p.onComplete();
+
+        bs = Disposables.empty();
+
+        p.onSubscribe(bs);
+
+        assertTrue(bs.isDisposed());
+    }
+
+    @Test
+    public void onErrorAfterComplete() {
+        BehaviorSubject<Object> p = BehaviorSubject.create();
+
+        p.onComplete();
+
+        List<Throwable> errors = TestHelper.trackPluginErrors();
+        try {
+            p.onError(new TestException());
+
+            TestHelper.assertUndeliverable(errors, 0, TestException.class);
+        } finally {
+            RxJavaPlugins.reset();
+        }
+    }
+
+    @Test
+    public void cancelOnArrival2() {
+        BehaviorSubject<Object> p = BehaviorSubject.create();
+
+        TestObserver<Object> to = p.test();
+
+        p.test(true).assertEmpty();
+
+        p.onNext(1);
+        p.onComplete();
+
+        to.assertResult(1);
+    }
+
+    @Test
+    public void addRemoveRace() {
+        for (int i = 0; i < TestHelper.RACE_DEFAULT_LOOPS; i++) {
+            final BehaviorSubject<Object> p = BehaviorSubject.create();
+
+            final TestObserver<Object> to = p.test();
+
+            Runnable r1 = new Runnable() {
+                @Override
+                public void run() {
+                    p.test();
+                }
+            };
+
+            Runnable r2 = new Runnable() {
+                @Override
+                public void run() {
+                    to.cancel();
+                }
+            };
+
+            TestHelper.race(r1, r2);
+        }
+    }
+
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    @Test
+    public void subscribeOnNextRace() {
+        for (int i = 0; i < TestHelper.RACE_DEFAULT_LOOPS; i++) {
+            final BehaviorSubject<Object> p = BehaviorSubject.createDefault((Object)1);
+
+            final TestObserver[] to = { null };
+
+            Runnable r1 = new Runnable() {
+                @Override
+                public void run() {
+                    to[0] = p.test();
+                }
+            };
+
+            Runnable r2 = new Runnable() {
+                @Override
+                public void run() {
+                    p.onNext(2);
+                }
+            };
+
+            TestHelper.race(r1, r2);
+
+            if (to[0].valueCount() == 1) {
+                to[0].assertValue(2).assertNoErrors().assertNotComplete();
+            } else {
+                to[0].assertValues(1, 2).assertNoErrors().assertNotComplete();
+            }
+        }
+    }
+
+    @Test
+    public void innerDisposed() {
+        BehaviorSubject.create()
+        .subscribe(new Observer<Object>() {
+            @Override
+            public void onSubscribe(Disposable d) {
+                assertFalse(d.isDisposed());
+
+                d.dispose();
+
+                assertTrue(d.isDisposed());
+            }
+
+            @Override
+            public void onNext(Object value) {
+
+            }
+
+            @Override
+            public void onError(Throwable e) {
+
+            }
+
+            @Override
+            public void onComplete() {
+
+            }
+        });
+    }
+
+    @Test
+    public void completeSubscribeRace() throws Exception {
+        for (int i = 0; i < TestHelper.RACE_DEFAULT_LOOPS; i++) {
+            final BehaviorSubject<Object> p = BehaviorSubject.create();
+
+            final TestObserver<Object> to = new TestObserver<Object>();
+
+            Runnable r1 = new Runnable() {
+                @Override
+                public void run() {
+                    p.subscribe(to);
+                }
+            };
+
+            Runnable r2 = new Runnable() {
+                @Override
+                public void run() {
+                    p.onComplete();
+                }
+            };
+
+            TestHelper.race(r1, r2);
+
+            to.assertResult();
+        }
+    }
+
+    @Test
+    public void errorSubscribeRace() throws Exception {
+        for (int i = 0; i < TestHelper.RACE_DEFAULT_LOOPS; i++) {
+            final BehaviorSubject<Object> p = BehaviorSubject.create();
+
+            final TestObserver<Object> to = new TestObserver<Object>();
+
+            final TestException ex = new TestException();
+
+            Runnable r1 = new Runnable() {
+                @Override
+                public void run() {
+                    p.subscribe(to);
+                }
+            };
+
+            Runnable r2 = new Runnable() {
+                @Override
+                public void run() {
+                    p.onError(ex);
+                }
+            };
+
+            TestHelper.race(r1, r2);
+
+            to.assertFailure(TestException.class);
+        }
+    }
+
+    @Test
+    public void behaviorDisposableDisposeState() {
+        BehaviorSubject<Integer> bs = BehaviorSubject.create();
+        bs.onNext(1);
+
+        TestObserver<Integer> to = new TestObserver<Integer>();
+
+        BehaviorDisposable<Integer> bd = new BehaviorDisposable<Integer>(to, bs);
+        to.onSubscribe(bd);
+
+        assertFalse(bd.isDisposed());
+
+        bd.dispose();
+
+        assertTrue(bd.isDisposed());
+
+        bd.dispose();
+
+        assertTrue(bd.isDisposed());
+
+        assertTrue(bd.test(2));
+
+        bd.emitFirst();
+
+        to.assertEmpty();
+
+        bd.emitNext(2, 0);
+    }
+
+    @Test
+    public void emitFirstDisposeRace() {
+        for (int i = 0; i < TestHelper.RACE_LONG_LOOPS; i++) {
+
+            BehaviorSubject<Integer> bs = BehaviorSubject.create();
+            bs.onNext(1);
+
+            TestObserver<Integer> to = new TestObserver<Integer>();
+
+            final BehaviorDisposable<Integer> bd = new BehaviorDisposable<Integer>(to, bs);
+            to.onSubscribe(bd);
+
+            Runnable r1 = new Runnable() {
+                @Override
+                public void run() {
+                    bd.emitFirst();
+                }
+            };
+            Runnable r2 = new Runnable() {
+                @Override
+                public void run() {
+                    bd.dispose();
+                }
+            };
+
+            TestHelper.race(r1, r2);
+        }
+    }
+
+    @Test
+    public void emitNextDisposeRace() {
+        for (int i = 0; i < TestHelper.RACE_LONG_LOOPS; i++) {
+
+            BehaviorSubject<Integer> bs = BehaviorSubject.create();
+            bs.onNext(1);
+
+            TestObserver<Integer> to = new TestObserver<Integer>();
+
+            final BehaviorDisposable<Integer> bd = new BehaviorDisposable<Integer>(to, bs);
+            to.onSubscribe(bd);
+
+            Runnable r1 = new Runnable() {
+                @Override
+                public void run() {
+                    bd.emitNext(2, 0);
+                }
+            };
+            Runnable r2 = new Runnable() {
+                @Override
+                public void run() {
+                    bd.dispose();
+                }
+            };
+
+            TestHelper.race(r1, r2);
+        }
+    }
+
+    @Test
+    public void emittingEmitNext() {
+        BehaviorSubject<Integer> bs = BehaviorSubject.create();
+        bs.onNext(1);
+
+        TestObserver<Integer> to = new TestObserver<Integer>();
+
+        final BehaviorDisposable<Integer> bd = new BehaviorDisposable<Integer>(to, bs);
+        to.onSubscribe(bd);
+
+        bd.emitting = true;
+        bd.emitNext(2, 1);
+        bd.emitNext(3, 2);
+
+        assertNotNull(bd.queue);
     }
 }

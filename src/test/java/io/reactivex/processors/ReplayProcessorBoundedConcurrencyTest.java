@@ -1,11 +1,11 @@
 /**
- * Copyright 2016 Netflix, Inc.
- * 
+ * Copyright (c) 2016-present, RxJava Contributors.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is
  * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
  * the License for the specific language governing permissions and limitations under the License.
@@ -25,8 +25,7 @@ import org.reactivestreams.*;
 import io.reactivex.*;
 import io.reactivex.functions.Consumer;
 import io.reactivex.schedulers.Schedulers;
-import io.reactivex.subscribers.DefaultObserver;
-import io.reactivex.subscribers.TestSubscriber;
+import io.reactivex.subscribers.*;
 
 public class ReplayProcessorBoundedConcurrencyTest {
 
@@ -37,23 +36,23 @@ public class ReplayProcessorBoundedConcurrencyTest {
 
             @Override
             public void run() {
-                Flowable.create(new Publisher<Long>() {
+                Flowable.unsafeCreate(new Publisher<Long>() {
 
                     @Override
-                    public void subscribe(Subscriber<? super Long> o) {
+                    public void subscribe(Subscriber<? super Long> subscriber) {
                         System.out.println("********* Start Source Data ***********");
                         for (long l = 1; l <= 10000; l++) {
-                            o.onNext(l);
+                            subscriber.onNext(l);
                         }
                         System.out.println("********* Finished Source Data ***********");
-                        o.onComplete();
+                        subscriber.onComplete();
                     }
                 }).subscribe(replay);
             }
         });
         source.start();
 
-        long v = replay.toBlocking().last();
+        long v = replay.blockingLast();
         assertEquals(10000, v);
 
         // it's been played through once so now it will all be replays
@@ -62,7 +61,7 @@ public class ReplayProcessorBoundedConcurrencyTest {
 
             @Override
             public void run() {
-                Subscriber<Long> slow = new DefaultObserver<Long>() {
+                Subscriber<Long> slow = new DefaultSubscriber<Long>() {
 
                     @Override
                     public void onComplete() {
@@ -103,7 +102,7 @@ public class ReplayProcessorBoundedConcurrencyTest {
             @Override
             public void run() {
                 final CountDownLatch fastLatch = new CountDownLatch(1);
-                Subscriber<Long> fast = new DefaultObserver<Long>() {
+                Subscriber<Long> fast = new DefaultSubscriber<Long>() {
 
                     @Override
                     public void onComplete() {
@@ -146,16 +145,16 @@ public class ReplayProcessorBoundedConcurrencyTest {
 
             @Override
             public void run() {
-                Flowable.create(new Publisher<Long>() {
+                Flowable.unsafeCreate(new Publisher<Long>() {
 
                     @Override
-                    public void subscribe(Subscriber<? super Long> o) {
+                    public void subscribe(Subscriber<? super Long> subscriber) {
                         System.out.println("********* Start Source Data ***********");
                         for (long l = 1; l <= 10000; l++) {
-                            o.onNext(l);
+                            subscriber.onNext(l);
                         }
                         System.out.println("********* Finished Source Data ***********");
-                        o.onComplete();
+                        subscriber.onComplete();
                     }
                 }).subscribe(replay);
             }
@@ -180,7 +179,7 @@ public class ReplayProcessorBoundedConcurrencyTest {
 
                 @Override
                 public void run() {
-                    List<Long> values = replay.toList().toBlocking().last();
+                    List<Long> values = replay.toList().blockingGet();
                     listOfListsOfValues.add(values);
                     System.out.println("Finished thread: " + count);
                 }
@@ -223,15 +222,15 @@ public class ReplayProcessorBoundedConcurrencyTest {
     }
 
     /**
-     * Can receive timeout if subscribe never receives an onError/onCompleted ... which reveals a race condition.
+     * Can receive timeout if subscribe never receives an onError/onComplete ... which reveals a race condition.
      */
     @Test(timeout = 10000)
     public void testSubscribeCompletionRaceCondition() {
         for (int i = 0; i < 50; i++) {
-            final ReplayProcessor<String> subject = ReplayProcessor.createUnbounded();
+            final ReplayProcessor<String> processor = ReplayProcessor.createUnbounded();
             final AtomicReference<String> value1 = new AtomicReference<String>();
 
-            subject.subscribe(new Consumer<String>() {
+            processor.subscribe(new Consumer<String>() {
 
                 @Override
                 public void accept(String t1) {
@@ -250,15 +249,15 @@ public class ReplayProcessorBoundedConcurrencyTest {
 
                 @Override
                 public void run() {
-                    subject.onNext("value");
-                    subject.onComplete();
+                    processor.onNext("value");
+                    processor.onComplete();
                 }
             });
 
-            SubjectObserverThread t2 = new SubjectObserverThread(subject);
-            SubjectObserverThread t3 = new SubjectObserverThread(subject);
-            SubjectObserverThread t4 = new SubjectObserverThread(subject);
-            SubjectObserverThread t5 = new SubjectObserverThread(subject);
+            SubjectObserverThread t2 = new SubjectObserverThread(processor);
+            SubjectObserverThread t3 = new SubjectObserverThread(processor);
+            SubjectObserverThread t4 = new SubjectObserverThread(processor);
+            SubjectObserverThread t5 = new SubjectObserverThread(processor);
 
             t2.start();
             t3.start();
@@ -283,8 +282,9 @@ public class ReplayProcessorBoundedConcurrencyTest {
         }
 
     }
-    
+
     /**
+     * Make sure emission-subscription races are handled correctly.
      * https://github.com/ReactiveX/RxJava/issues/1147
      */
     @Test
@@ -301,24 +301,25 @@ public class ReplayProcessorBoundedConcurrencyTest {
 
     private static class SubjectObserverThread extends Thread {
 
-        private final ReplayProcessor<String> subject;
+        private final ReplayProcessor<String> processor;
         private final AtomicReference<String> value = new AtomicReference<String>();
 
-        public SubjectObserverThread(ReplayProcessor<String> subject) {
-            this.subject = subject;
+        SubjectObserverThread(ReplayProcessor<String> processor) {
+            this.processor = processor;
         }
 
         @Override
         public void run() {
             try {
-                // a timeout exception will happen if we don't get a terminal state 
-                String v = subject.timeout(2000, TimeUnit.MILLISECONDS).toBlocking().single();
+                // a timeout exception will happen if we don't get a terminal state
+                String v = processor.timeout(2000, TimeUnit.MILLISECONDS).blockingSingle();
                 value.set(v);
             } catch (Exception e) {
                 e.printStackTrace();
             }
         }
     }
+
     @Test
     public void testReplaySubjectEmissionSubscriptionRace() throws Exception {
         Scheduler s = Schedulers.io();
@@ -329,9 +330,9 @@ public class ReplayProcessorBoundedConcurrencyTest {
                     System.out.println(i);
                 }
                 final ReplayProcessor<Object> rs = ReplayProcessor.createWithSize(2);
-                
-                final CountDownLatch finish = new CountDownLatch(1); 
-                final CountDownLatch start = new CountDownLatch(1); 
+
+                final CountDownLatch finish = new CountDownLatch(1);
+                final CountDownLatch start = new CountDownLatch(1);
 
 //                int j = i;
 
@@ -347,43 +348,43 @@ public class ReplayProcessorBoundedConcurrencyTest {
                         rs.onNext(1);
                     }
                 });
-                
+
                 final AtomicReference<Object> o = new AtomicReference<Object>();
-                
+
                 rs
 //                .doOnSubscribe(v -> System.out.println("!! " + j))
 //                .doOnNext(e -> System.out.println(">> " + j))
                 .subscribeOn(s)
                 .observeOn(Schedulers.io())
 //                .doOnNext(e -> System.out.println(">>> " + j))
-                .subscribe(new DefaultObserver<Object>() {
-    
+                .subscribe(new DefaultSubscriber<Object>() {
+
                     @Override
                     protected void onStart() {
                         super.onStart();
                     }
-                    
+
                     @Override
                     public void onComplete() {
                         o.set(-1);
                         finish.countDown();
                     }
-    
+
                     @Override
                     public void onError(Throwable e) {
                         o.set(e);
                         finish.countDown();
                     }
-    
+
                     @Override
                     public void onNext(Object t) {
                         o.set(t);
                         finish.countDown();
                     }
-                    
+
                 });
                 start.countDown();
-                
+
                 if (!finish.await(5, TimeUnit.SECONDS)) {
                     System.out.println(o.get());
                     System.out.println(rs.hasSubscribers());
@@ -404,11 +405,12 @@ public class ReplayProcessorBoundedConcurrencyTest {
             worker.dispose();
         }
     }
+
     @Test(timeout = 5000)
     public void testConcurrentSizeAndHasAnyValue() throws InterruptedException {
         final ReplayProcessor<Object> rs = ReplayProcessor.createUnbounded();
         final CyclicBarrier cb = new CyclicBarrier(2);
-        
+
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -455,14 +457,15 @@ public class ReplayProcessorBoundedConcurrencyTest {
             }
             lastSize = size;
         }
-        
+
         t.join();
     }
+
     @Test(timeout = 5000)
     public void testConcurrentSizeAndHasAnyValueBounded() throws InterruptedException {
         final ReplayProcessor<Object> rs = ReplayProcessor.createWithSize(3);
         final CyclicBarrier cb = new CyclicBarrier(2);
-        
+
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -498,14 +501,15 @@ public class ReplayProcessorBoundedConcurrencyTest {
                 assertEquals(1, v2 - v1);
             }
         }
-        
+
         t.join();
     }
+
     @Test(timeout = 10000)
     public void testConcurrentSizeAndHasAnyValueTimeBounded() throws InterruptedException {
         final ReplayProcessor<Object> rs = ReplayProcessor.createWithTime(1, TimeUnit.MILLISECONDS, Schedulers.computation());
         final CyclicBarrier cb = new CyclicBarrier(2);
-        
+
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -548,7 +552,7 @@ public class ReplayProcessorBoundedConcurrencyTest {
                 assertEquals(1, v2 - v1);
             }
         }
-        
+
         t.join();
     }
 }
